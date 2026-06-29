@@ -1,4 +1,4 @@
-# SlimeVR BMDT — Bare-Metal Dummy Trackers
+# SlimeVR_IMUReconstruction
 
 A minimal motion-capture pipeline using ESP32 + MPU6050 IMUs, the SlimeVR server for skeleton IK, and a Three.js web viewer for a Mixamo-rigged character.
 
