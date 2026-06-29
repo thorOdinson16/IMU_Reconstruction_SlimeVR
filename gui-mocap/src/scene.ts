@@ -87,6 +87,8 @@ export class MocapScene {
   private mixamoLoading = false;
   private onModelStatus: ((status: string) => void) | null = null;
 
+  private bindPoseLocal = new Map<BodyPart, THREE.Quaternion>();
+
   private parentWorldInv = new THREE.Quaternion();
   private worldQuat = new THREE.Quaternion();
 
@@ -140,14 +142,14 @@ export class MocapScene {
     let prevX = 0;
     let prevY = 0;
     let theta = 0;
-    let phi = Math.PI / 4;
+    let phi = 1.2;
     let radius = 3.5;
 
     const updateCam = () => {
       this.camera.position.x = radius * Math.sin(phi) * Math.sin(theta);
-      this.camera.position.y = radius * Math.cos(phi) + 0.9;
+      this.camera.position.y = radius * Math.cos(phi) + 0.6;
       this.camera.position.z = radius * Math.sin(phi) * Math.cos(theta);
-      this.camera.lookAt(0, 0.9, 0);
+      this.camera.lookAt(0, 0.6, 0);
     };
 
     this.renderer.domElement.addEventListener('pointerdown', (e) => {
@@ -213,7 +215,10 @@ export class MocapScene {
       const bones = skinnedMesh.skeleton.bones;
       for (const [bodyPart, boneName] of Object.entries(SLIMEVR_TO_MIXAMO)) {
         const bone = bones.find((b) => b.name === boneName);
-        if (bone) this.mixamoBones.set(Number(bodyPart) as BodyPart, bone);
+        if (bone) {
+          this.mixamoBones.set(Number(bodyPart) as BodyPart, bone);
+          this.bindPoseLocal.set(Number(bodyPart) as BodyPart, bone.quaternion.clone());
+        }
       }
 
       this.scene.add(model);
@@ -242,6 +247,14 @@ export class MocapScene {
     const dataByPart = new Map<BodyPart, BoneT>();
     for (const b of bones) dataByPart.set(b.bodyPart, b);
 
+    // Start from T-pose each frame
+    for (const [bp, bone] of this.mixamoBones) {
+      const q = this.bindPoseLocal.get(bp);
+      if (q) bone.quaternion.copy(q);
+    }
+    this.mixamoScene!.updateMatrixWorld(true);
+
+    // Apply server world rotations
     const rootData = dataByPart.get(BodyPart.HIP);
     if (rootData && rootData.headPositionG) {
       rootBone.position.set(rootData.headPositionG.x, rootData.headPositionG.y, rootData.headPositionG.z);
@@ -276,6 +289,12 @@ export class MocapScene {
       if (!mixamoBone || !data || !data.rotationG) continue;
 
       const q = data.rotationG;
+
+      // Server sends near-identity → body part at T-pose → keep T-pose local
+      if (Math.abs(q.w) > 0.999 && Math.abs(q.x) < 0.03 && Math.abs(q.y) < 0.03 && Math.abs(q.z) < 0.03) {
+        continue;
+      }
+
       if (!mixamoBone.parent || !(mixamoBone.parent instanceof THREE.Bone)) {
         mixamoBone.quaternion.set(q.x, q.y, q.z, q.w);
         continue;
