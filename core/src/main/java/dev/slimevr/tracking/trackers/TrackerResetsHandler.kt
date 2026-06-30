@@ -267,10 +267,12 @@ class TrackerResetsHandler(val tracker: Tracker) {
 			postProcessResetFull(reference)
 			return
 		}
-		// Adjust for T-Pose (down)
-		tposeDownFix = if (((tracker.trackerPosition.isLeftArm() || tracker.trackerPosition.isLeftFinger()) && armsResetMode == ArmsResetModes.TPOSE_DOWN)) {
+		// Adjust for T-Pose (down or up)
+		tposeDownFix = if (((tracker.trackerPosition.isLeftArm() || tracker.trackerPosition.isLeftFinger()) &&
+			(armsResetMode == ArmsResetModes.TPOSE_DOWN || armsResetMode == ArmsResetModes.TPOSE_UP))) {
 			EulerAngles(EulerOrder.YZX, 0f, 0f, -FastMath.HALF_PI).toQuaternion()
-		} else if (((tracker.trackerPosition.isRightArm() || tracker.trackerPosition.isRightFinger()) && armsResetMode == ArmsResetModes.TPOSE_DOWN)) {
+		} else if (((tracker.trackerPosition.isRightArm() || tracker.trackerPosition.isRightFinger()) &&
+			(armsResetMode == ArmsResetModes.TPOSE_DOWN || armsResetMode == ArmsResetModes.TPOSE_UP))) {
 			EulerAngles(EulerOrder.YZX, 0f, 0f, FastMath.HALF_PI).toQuaternion()
 		} else {
 			Quaternion.IDENTITY

@@ -118,7 +118,7 @@ tapDetection:
   numberTrackersOverThreshold: 1
 resetsConfig:
   resetMountingFeet: false
-  mode: "BACK"
+  mode: "TPOSE_DOWN"
   yawResetSmoothTime: 0.0
   saveMountingReset: false
   resetHmdPitch: false

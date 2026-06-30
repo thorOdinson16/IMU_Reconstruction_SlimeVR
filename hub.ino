@@ -7,8 +7,8 @@
 #include "MPU6050_6Axis_MotionApps612.h"
 
 const char* SELF_LABEL = "CHEST"; // HIPS
-const char* ssid       = "TP-Link_DF6C_Cave";
-const char* password   = "Caveiot@123";
+const char* ssid       = "Priya";
+const char* password   = "9916466000";
 
 const char*  server_ip = "192.168.0.104";   // CHANGE to your PC's IP
 const unsigned int port   = 5005;
