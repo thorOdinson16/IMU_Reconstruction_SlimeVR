@@ -259,7 +259,6 @@ class TrackerResetsHandler(val tracker: Tracker) {
 	 */
 	fun resetFull(reference: Quaternion) {
 		constraintFix = Quaternion.IDENTITY
-
 		if (tracker.trackerDataType == TrackerDataType.FLEX_RESISTANCE) {
 			tracker.trackerFlexHandler.resetMin()
 			postProcessResetFull(reference)
@@ -268,7 +267,6 @@ class TrackerResetsHandler(val tracker: Tracker) {
 			postProcessResetFull(reference)
 			return
 		}
-
 		// Adjust for T-Pose (down)
 		tposeDownFix = if (((tracker.trackerPosition.isLeftArm() || tracker.trackerPosition.isLeftFinger()) && armsResetMode == ArmsResetModes.TPOSE_DOWN)) {
 			EulerAngles(EulerOrder.YZX, 0f, 0f, -FastMath.HALF_PI).toQuaternion()
@@ -277,66 +275,66 @@ class TrackerResetsHandler(val tracker: Tracker) {
 		} else {
 			Quaternion.IDENTITY
 		}
-
 		// Old rot for drift compensation
 		val oldRot = adjustToReference(tracker.getRawRotation())
 		lastResetQuaternion = oldRot
 
-		// Adjust raw rotation to mountingOrientation
+		// Use a stabilized raw rotation for gyroFix specifically, since a single
+		// instantaneous sample can land near the yaw-extraction singularity and
+		// produce a bad gyroFix that causes large jumps on the next small movement.
+		val stableRawRotation = stabilizedRawRotation()
 		val mountingAdjustedRotation = tracker.getRawRotation() * mountingOrientation
+		val stableMountingAdjustedRotation = stableRawRotation * mountingOrientation
 
 		// Gyrofix
 		if (tracker.allowMounting || (tracker.trackerPosition == TrackerPosition.HEAD && !tracker.isHmd)) {
 			gyroFix = if (tracker.isComputed) {
-				fixGyroscope(tracker.getRawRotation())
+				fixGyroscope(stableRawRotation)
 			} else {
-				fixGyroscope(mountingAdjustedRotation * tposeDownFix)
+				fixGyroscope(stableMountingAdjustedRotation * tposeDownFix)
 			}
 		}
-
 		// Mounting for computed trackers
 		if (tracker.isComputed && tracker.trackerPosition != TrackerPosition.HEAD) {
-			// Set mounting to the reference's yaw so that a computed
-			// tracker goes forward according to the head tracker.
 			mountRotFix = getYawQuaternion(reference)
 		}
-
 		// Attachment fix
 		attachmentFix = if (tracker.trackerPosition == TrackerPosition.HEAD && tracker.isHmd) {
 			if (resetHmdPitch) {
-				// Reset the HMD's pitch if it's assigned to head and resetHmdPitch is true
-				// Get rotation without yaw (make sure to use the raw rotation directly!)
 				val rotBuf = getYawQuaternion(tracker.getRawRotation()).inv() * tracker.getRawRotation()
-				// Isolate pitch
 				Quaternion(rotBuf.w, -rotBuf.x, 0f, 0f).unit()
 			} else {
-				// Don't reset the HMD at all
 				Quaternion.IDENTITY
 			}
 		} else {
 			fixAttachment(mountingAdjustedRotation)
 		}
-
-		// Rotate attachmentFix by 180 degrees as a workaround for t-pose (down)
 		if (tposeDownFix != Quaternion.IDENTITY && tracker.allowMounting) {
 			attachmentFix *= HalfHorizontal
 		}
-
 		makeIdentityAdjustmentQuatsFull()
-
-		// Don't adjust yaw if head and computed
 		if (tracker.trackerPosition != TrackerPosition.HEAD || !tracker.isComputed) {
 			yawFix = fixYaw(mountingAdjustedRotation, reference)
 			tracker.yawResetSmoothing.reset()
 		}
-
 		calculateDrift(oldRot)
-
-		// Reset Stay Aligned (before resetting filtering, which depends on the
-		// tracker's rotation)
 		tracker.stayAligned.reset()
-
 		postProcessResetFull(reference)
+	}
+
+	// Small ring buffer of recent raw rotations, fed from wherever raw rotation is
+	// updated each packet (e.g. in parseTextPacket / dataTick), used only to smooth
+	// out the single sample taken at reset time.
+	private val rawRotHistory = ArrayDeque<Quaternion>()
+	fun pushRawRotationSample(q: Quaternion) {
+		rawRotHistory.addLast(q)
+		if (rawRotHistory.size > 5) rawRotHistory.removeFirst()
+	}
+	private fun stabilizedRawRotation(): Quaternion {
+		if (rawRotHistory.isEmpty()) return tracker.getRawRotation()
+		var sumMat = rawRotHistory[0].toMatrix()
+		for (i in 1 until rawRotHistory.size) sumMat += rawRotHistory[i].toMatrix()
+		return (sumMat * (1f / rawRotHistory.size)).toQuaternion()
 	}
 
 	private fun postProcessResetFull(reference: Quaternion) {
@@ -479,13 +477,32 @@ class TrackerResetsHandler(val tracker: Tracker) {
 		return rot.inv() * reference.project(Vector3.POS_Y).unit()
 	}
 
-	// TODO : isolating yaw for yaw reset bad.
-	// The way we isolate the tracker's yaw for yaw reset is
-	// incorrect. Projection around the Y-axis is worse.
-	// In both cases, the isolated yaw value changes
-	// with the tracker's roll when pointing forward.
-	// calling twinNearest() makes sure this rotation has the wanted polarity (+-).
-	private fun getYawQuaternion(rot: Quaternion): Quaternion = EulerAngles(EulerOrder.YZX, 0f, rot.toEulerAngles(EulerOrder.YZX).y, 0f).toQuaternion().twinNearest(rot)
+	// Extracts yaw as a continuous float angle, then reconstructs the pure-Y quaternion.
+	// Uses YZX Euler decomposition normally; near gimbal lock (kc < 1e-2) falls back
+	// to Y-axis projection. No twinNearest — reconstructing from the angle avoids
+	// polarity flips that cause 360° yaw wraps.
+	private fun getYawQuaternion(rot: Quaternion): Quaternion {
+		val m = rot.toMatrix()
+		val kc = sqrt(m.xx * m.xx + m.xz * m.xz)
+
+		val proj = rot.project(Vector3.POS_Y)
+		val projAngle = 2f * atan2(proj.y, proj.w)
+
+		// Widen the band a lot — kc near 0.3 is still common for a hanging arm,
+		// not just a rare singularity
+		val yawAngle = if (kc < 0.3f) {
+			projAngle
+		} else if (kc < 0.5f) {
+			val eulerAngle = rot.toEulerAngles(EulerOrder.YZX).y
+			val t = (kc - 0.3f) / (0.5f - 0.3f)
+			var diff = eulerAngle - projAngle
+			diff = ((diff + FastMath.PI) % (2f * FastMath.PI)) - FastMath.PI
+			projAngle + diff * t
+		} else {
+			rot.toEulerAngles(EulerOrder.YZX).y
+		}
+		return Quaternion(cos(yawAngle / 2f), 0f, sin(yawAngle / 2f), 0f)
+	}
 
 	private fun makeIdentityAdjustmentQuatsFull() {
 		val sensorRotation = tracker.getRawRotation()

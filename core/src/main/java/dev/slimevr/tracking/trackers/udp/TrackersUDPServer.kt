@@ -88,6 +88,20 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		return result
 	}
 
+	/**
+	 * Auto-calibrated imuAlignment computed from the first raw sensor reading.
+	 * Overrides [getImuAlignment] when no explicit config override is set.
+	 */
+	private var autoImuAlignment: Quaternion? = null
+
+	/**
+	 * Applies the imuAlignment rotation to convert the raw sensor quaternion
+	 * from the physical IMU mounting orientation to the SlimeVR coordinate frame.
+	 * Uses auto-calibrated alignment if no explicit config override is set.
+	 */
+	private fun applyImuAlignment(raw: Quaternion): Quaternion =
+		(autoImuAlignment ?: getImuAlignment()) * raw
+
 	// Tracks which text labels have logged their raw quaternion (for calibration)
 	private val rawQuatLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -122,7 +136,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				isComputed = false,
 				allowReset = true,
 				allowMounting = true,
-				trackRotDirection = true
+				trackRotDirection = false
 			)
 			tracker.status = TrackerStatus.OK
 			val existing = textTrackers.putIfAbsent(position, tracker)
@@ -134,14 +148,24 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 			}
 		}
 
-		val sensorQuat = Quaternion(qw, qx, qy, qz)
+		val sensorQuat = Quaternion(qw, qy, -qx, qz)
 
-		// Log the first raw quaternion for each tracker (useful for calibrating imuAlignment)
-		if (rawQuatLogged.add(label)) {
-			LogManager.info("[TrackerServer] Raw $label: w=${sensorQuat.w} x=${sensorQuat.x} y=${sensorQuat.y} z=${sensorQuat.z} — place sensor flat on table with LED north to calibrate")
+		// Auto-calibrate imuAlignment from the first sensor reading (assumes user is
+		// standing straight and facing forward at startup). Once set, all subsequent
+		// readings use this alignment, making the tracker read identity in the
+		// canonical standing pose. Skips if an explicit config override already exists.
+		if (autoImuAlignment == null && VRServer.instance?.configManager?.vrConfig?.server?.imuAlignment == null) {
+			val mounting = position.defaultMounting()
+			autoImuAlignment = mounting.inv() * sensorQuat.inv()
+			LogManager.info("[TrackerServer] Auto-calibrated imuAlignment from $label: w=${autoImuAlignment!!.w} x=${autoImuAlignment!!.x} y=${autoImuAlignment!!.y} z=${autoImuAlignment!!.z}")
 		}
 
-		val slimevrQuat = getImuAlignment() * sensorQuat
+		// Log the first raw quaternion for each tracker
+		if (rawQuatLogged.add(label)) {
+			LogManager.info("[TrackerServer] Raw $label: w=${sensorQuat.w} x=${sensorQuat.x} y=${sensorQuat.y} z=${sensorQuat.z}")
+		}
+
+		val slimevrQuat = applyImuAlignment(sensorQuat)
 		tracker.setRotation(slimevrQuat)
 		tracker.dataTick()
 
@@ -507,7 +531,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 			is RotationPacket -> {
 				var rot = packet.rotation
-				rot = getImuAlignment() * rot
+				rot = applyImuAlignment(rot)
 				val tracker = connection?.getTracker(packet.sensorId) ?: return
 				if (tracker.status == TrackerStatus.DISCONNECTED) tracker.status = TrackerStatus.OK
 				tracker.setRotation(rot)
@@ -527,7 +551,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				val tracker = connection?.getTracker(packet.sensorId) ?: return
 				if (tracker.status == TrackerStatus.DISCONNECTED) tracker.status = TrackerStatus.OK
 				var rot17 = packet.rotation
-				rot17 = getImuAlignment() * rot17
+				rot17 = applyImuAlignment(rot17)
 				when (packet.dataType) {
 					UDPPacket17RotationData.DATA_TYPE_NORMAL -> {
 						tracker.setRotation(rot17)
