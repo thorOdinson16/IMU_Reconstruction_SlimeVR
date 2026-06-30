@@ -71,10 +71,25 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		"L_TH"  to TrackerPosition.LEFT_UPPER_LEG,
 		"R_TH"  to TrackerPosition.RIGHT_UPPER_LEG
 	)
-	private val axesOffset = fromRotationVector(-FastMath.HALF_PI, 0f, 0f)
-
 	// Cache of text-parser trackers by position (avoid race with allTrackers copy)
 	private val textTrackers = java.util.concurrent.ConcurrentHashMap<TrackerPosition, Tracker>()
+
+	private var imuAlignmentLogged = false
+
+	/** Returns the IMU axes alignment offset from config, falling back to the default (-90° around X). */
+	private fun getImuAlignment(): Quaternion {
+		val config = VRServer.instance?.configManager?.vrConfig?.server?.imuAlignment
+		val result = config?.toValue() ?: DEFAULT_IMU_ALIGNMENT
+		if (!imuAlignmentLogged) {
+			imuAlignmentLogged = true
+			val source = if (config != null) "config" else "default"
+			LogManager.info("[TrackerServer] IMU alignment: ($source) w=${result.w} x=${result.x} y=${result.y} z=${result.z}")
+		}
+		return result
+	}
+
+	// Tracks which text labels have logged their raw quaternion (for calibration)
+	private val rawQuatLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
 	private fun parseTextPacket(msg: String) {
 		val parts = msg.trim().split(",")
@@ -120,9 +135,19 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		}
 
 		val sensorQuat = Quaternion(qw, qx, qy, qz)
-		val slimevrQuat = axesOffset * sensorQuat
+
+		// Log the first raw quaternion for each tracker (useful for calibrating imuAlignment)
+		if (rawQuatLogged.add(label)) {
+			LogManager.info("[TrackerServer] Raw $label: w=${sensorQuat.w} x=${sensorQuat.x} y=${sensorQuat.y} z=${sensorQuat.z} — place sensor flat on table with LED north to calibrate")
+		}
+
+		val slimevrQuat = getImuAlignment() * sensorQuat
 		tracker.setRotation(slimevrQuat)
 		tracker.dataTick()
+
+		// Ensure per-body-part mounting orientation is applied (constructor doesn't
+		// trigger the observable setter that sets body-part-specific defaults)
+		tracker.resetsHandler.mountingOrientation = position.defaultMounting()
 	}
 	// ---------- End custom parser ----------
 
@@ -482,7 +507,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 			is RotationPacket -> {
 				var rot = packet.rotation
-				rot = AXES_OFFSET.times(rot)
+				rot = getImuAlignment() * rot
 				val tracker = connection?.getTracker(packet.sensorId) ?: return
 				if (tracker.status == TrackerStatus.DISCONNECTED) tracker.status = TrackerStatus.OK
 				tracker.setRotation(rot)
@@ -502,7 +527,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				val tracker = connection?.getTracker(packet.sensorId) ?: return
 				if (tracker.status == TrackerStatus.DISCONNECTED) tracker.status = TrackerStatus.OK
 				var rot17 = packet.rotation
-				rot17 = AXES_OFFSET * rot17
+				rot17 = getImuAlignment() * rot17
 				when (packet.dataType) {
 					UDPPacket17RotationData.DATA_TYPE_NORMAL -> {
 						tracker.setRotation(rot17)
@@ -726,9 +751,11 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 	companion object {
 		/**
-		 * Change between IMU axes and OpenGL/SteamVR axes
+		 * Default IMU axes alignment offset: -90° around X, converting from the standard
+		 * flat-mounted IMU orientation to the SlimeVR/OpenGL coordinate frame.
+		 * Can be overridden via `server.imuAlignment` in config.json.
 		 */
-		private val AXES_OFFSET = fromRotationVector(-FastMath.HALF_PI, 0f, 0f)
+		private val DEFAULT_IMU_ALIGNMENT = fromRotationVector(-FastMath.HALF_PI, 0f, 0f)
 
 		// TODO: Set this offset to Quaternion.IDENTITY when the firmware is corrected!
 		// 270 deg (-90 deg) default for officials

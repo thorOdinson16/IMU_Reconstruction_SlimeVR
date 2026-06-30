@@ -16,6 +16,7 @@ fun main() {
 
     // Load configuration – ConfigManager expects a file path string
     val configManager = ConfigManager(configFile.absolutePath)
+    configManager.loadConfig()
 
     // If vrConfig is still null (e.g., config is empty), fall back to default
     if (configManager.vrConfig == null) {

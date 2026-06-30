@@ -2,6 +2,7 @@ package dev.slimevr.config
 
 import dev.slimevr.VRServer
 import dev.slimevr.tracking.trackers.udp.MagnetometerStatus
+import io.github.axisangles.ktmath.ObjectQuaternion
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -9,6 +10,15 @@ import kotlinx.coroutines.sync.Mutex
 
 class ServerConfig {
 	val trackerPort: Int = 6969
+
+	/**
+	 * Override for the IMU-to-SlimeVR axes alignment offset.
+	 * This is a quaternion applied to every incoming sensor rotation to convert from the
+	 * physical IMU mounting orientation to the SlimeVR coordinate frame.
+	 * Default (null) applies the standard -90° around X offset used for flat-mounted IMUs.
+	 * Set this to match your sensor's physical orientation (e.g. for vertical/edge-on mounting).
+	 */
+	var imuAlignment: ObjectQuaternion? = null
 
 	var useMagnetometerOnAllTrackers: Boolean = false
 		private set
