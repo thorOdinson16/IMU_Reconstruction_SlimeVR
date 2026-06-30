@@ -70,7 +70,7 @@ The server listens on:
 cd gui-mocap
 
 npm install
-npx dev vite
+npx vite dev
 ```
 
 Open `http://localhost:5173` in a browser. The viewer connects to the server at `ws://<server-ip>:21110`.
