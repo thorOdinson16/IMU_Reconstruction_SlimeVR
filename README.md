@@ -5,14 +5,14 @@ A minimal motion-capture pipeline using ESP32 + MPU6050 IMUs, the SlimeVR server
 ## Architecture
 
 ```
-┌─────────────────────┐      ESP-NOW        ┌──────────────┐      UDP       ┌──────────────────────┐
-│  10× Sensor Nodes   │ ──────────────────▶  │  2× Hubs     │ ────────────▶  │   SlimeVR Server     │
+┌──────────────────────┐      ESP-NOW         ┌──────────────┐      UDP       ┌───────────────────────┐
+│  10× Sensor Nodes    │ ──────────────────▶  │  2× Hubs     │ ────────────▶  │   SlimeVR Server      │
 │  (MPU6050 per joint) │  (per-board label)   │ (CHEST/HIPS) │  "CHEST,qw,…"  │  (core/, Java/Kotlin) │
-└─────────────────────┘                      └──────────────┘               │                      │
-                                                                            │  IK skeleton         │
-                                                                 WebSocket  │  Reset/calibration   │
-                                                                    :21110  │  Text protocol parser│
-                                                                     │      └──────────────────────┘
+└──────────────────────┘                      └──────────────┘                │                       │
+                                                                              │  IK skeleton          │
+                                                                 WebSocket    │  Reset/calibration    │
+                                                                    :21110    │  Text protocol parser │
+                                                                     │        └───────────────────────┘
                                                                      ▼
                                                           ┌──────────────────────┐
                                                           │  Three.js Viewer     │
@@ -54,8 +54,10 @@ A minimal motion-capture pipeline using ESP32 + MPU6050 IMUs, the SlimeVR server
 ### 1. Server
 
 ```bash
+gradle wrapper
+
 ./gradlew build
-./gradlew run
+./gradlew run --no-daemon
 ```
 
 The server listens on:
@@ -66,8 +68,9 @@ The server listens on:
 
 ```bash
 cd gui-mocap
-pnpm install
-pnpm dev
+
+npm install
+npx dev vite
 ```
 
 Open `http://localhost:5173` in a browser. The viewer connects to the server at `ws://<server-ip>:21110`.
