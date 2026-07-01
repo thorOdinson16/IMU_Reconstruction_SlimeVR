@@ -94,10 +94,6 @@ class UserHeightCalibration(val server: VRServer, val humanPoseManager: HumanPos
 		clear()
 		checkTrackers()
 
-		if (!server.serverGuards.canDoUserHeightCalibration) {
-			return
-		}
-
 		startTime = System.nanoTime()
 
 		status = UserHeightCalibrationStatus.RECORDING_FLOOR
@@ -141,8 +137,6 @@ class UserHeightCalibration(val server: VRServer, val humanPoseManager: HumanPos
 				!it.isInternal &&
 				it.status == TrackerStatus.OK
 		}
-		server.serverGuards.canDoUserHeightCalibration = hmd != null && handTrackers.isNotEmpty()
-
 		currentHeight = 0f
 		currentFloorLevel = 0f
 	}
@@ -154,9 +148,6 @@ class UserHeightCalibration(val server: VRServer, val humanPoseManager: HumanPos
 		server.humanPoseManager.resetOffsets()
 		server.humanPoseManager.saveConfig()
 		server.configManager.saveConfig()
-
-		server.trackingChecklistManager.resetMountingCompleted = false
-		server.trackingChecklistManager.feetResetMountingCompleted = false
 	}
 
 	fun tick() {

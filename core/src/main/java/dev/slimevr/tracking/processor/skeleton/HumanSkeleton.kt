@@ -1549,8 +1549,6 @@ class HumanSkeleton(
 
 	@JvmOverloads
 	fun resetTrackersFull(resetSourceName: String?, bodyParts: List<Int> = ArrayList()) {
-		humanPoseManager.server?.serverGuards?.onFullReset()
-
 		var referenceRotation = IDENTITY
 		headTracker?.let {
 			if (bodyParts.isEmpty() || bodyParts.contains(BodyPart.HEAD)) {
@@ -1643,23 +1641,8 @@ class HumanSkeleton(
 		legTweaks.resetBuffer()
 		localizer.reset()
 
-		if (humanPoseManager.server != null) {
-			humanPoseManager.server.configManager.vrConfig.resetsConfig.lastMountingMethod =
-				MountingMethods.AUTOMATIC
-			if (!humanPoseManager.server.trackingChecklistManager.resetMountingCompleted) {
-				humanPoseManager.server.trackingChecklistManager.resetMountingCompleted = bodyParts.any { it ->
-					val defaultParts = if (humanPoseManager.server.configManager.vrConfig.resetsConfig.resetMountingFeet) {
-						TrackerUtils.allBodyPartsButFingers
-					} else {
-						TrackerUtils.allBodyPartsButFingersAndFeets
-					}
-
-					return@any defaultParts.contains(it)
-				}
-			}
-			if (!humanPoseManager.server.trackingChecklistManager.feetResetMountingCompleted) {
-				humanPoseManager.server.trackingChecklistManager.feetResetMountingCompleted = bodyParts.any { TrackerUtils.feetsBodyParts.contains(it) }
-			}
+		humanPoseManager.server?.configManager?.vrConfig?.resetsConfig?.let {
+			it.lastMountingMethod = MountingMethods.AUTOMATIC
 			humanPoseManager.server.configManager.saveConfig()
 		}
 
@@ -1681,11 +1664,7 @@ class HumanSkeleton(
 		legTweaks.resetBuffer()
 		LogManager.info("[HumanSkeleton] Clear: mounting ($resetSourceName)")
 
-		if (humanPoseManager.server != null) {
-			humanPoseManager.server.trackingChecklistManager.resetMountingCompleted = false
-			humanPoseManager.server.trackingChecklistManager.feetResetMountingCompleted = false
-			humanPoseManager.server.configManager.saveConfig()
-		}
+		humanPoseManager.server?.configManager?.saveConfig()
 	}
 
 	fun updateTapDetectionConfig() {

@@ -98,11 +98,6 @@ class DataFeedHandler(private val api: ProtocolAPI) : ProtocolHandler<DataFeedMe
 			stayAlignedPoseOffset = createStayAlignedPose(fbb, this.api.server.humanPoseManager.skeleton)
 		}
 
-		var serverGuardsOffset = 0
-		if (config.serverGuardsMask) {
-			serverGuardsOffset = createServerGuard(fbb, this.api.server.serverGuards)
-		}
-
 		return DataFeedUpdate
 			.createDataFeedUpdate(
 				fbb,
@@ -111,7 +106,7 @@ class DataFeedHandler(private val api: ProtocolAPI) : ProtocolHandler<DataFeedMe
 				bonesOffset,
 				stayAlignedPoseOffset,
 				index,
-				serverGuardsOffset,
+				0,
 			)
 	}
 

@@ -16,9 +16,7 @@ import dev.slimevr.util.ann.VRServerThread
 import io.eiren.util.ann.ThreadSafe
 import io.eiren.util.collections.FastList
 import io.eiren.util.logging.LogManager
-import io.github.axisangles.ktmath.Quaternion.Companion.IDENTITY
 import io.github.axisangles.ktmath.Vector3
-import io.github.axisangles.ktmath.Vector3.Companion.POS_Y
 import org.apache.commons.math3.util.Precision
 import java.util.function.Consumer
 import kotlin.math.*
@@ -479,15 +477,6 @@ class HumanPoseManager(val server: VRServer?) {
 	fun resetTrackersFull(resetSourceName: String?, bodyParts: List<Int> = ArrayList()) {
 		skeleton.resetTrackersFull(resetSourceName, bodyParts)
 		if (server != null) {
-			if (skeleton.headTracker == null && skeleton.neckTracker == null) {
-				server.vrcOSCHandler.yawAlign(IDENTITY)
-			} else {
-				server.vrcOSCHandler
-					.yawAlign(
-						headBone.getGlobalRotation().project(POS_Y),
-					)
-			}
-			server.vMCHandler.alignVMCTracking(headBone.getGlobalRotation())
 			logTrackersDrift()
 		}
 	}
@@ -496,15 +485,6 @@ class HumanPoseManager(val server: VRServer?) {
 	fun resetTrackersYaw(resetSourceName: String?, bodyParts: List<Int> = TrackerUtils.allBodyPartsButFingers) {
 		skeleton.resetTrackersYaw(resetSourceName, bodyParts)
 		if (server != null) {
-			if (skeleton.headTracker == null && skeleton.neckTracker == null) {
-				server.vrcOSCHandler.yawAlign(IDENTITY)
-			} else {
-				server.vrcOSCHandler
-					.yawAlign(
-						headBone.getGlobalRotation().project(POS_Y),
-					)
-			}
-			server.vMCHandler.alignVMCTracking(headBone.getGlobalRotation())
 			logTrackersDrift()
 		}
 	}

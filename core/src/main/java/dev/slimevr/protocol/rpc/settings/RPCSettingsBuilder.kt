@@ -2,138 +2,32 @@ package dev.slimevr.protocol.rpc.settings
 
 import com.google.flatbuffers.FlatBufferBuilder
 import dev.slimevr.VRServer
-import dev.slimevr.bridge.ISteamVRBridge
 import dev.slimevr.config.AutoBoneConfig
 import dev.slimevr.config.DriftCompensationConfig
 import dev.slimevr.config.FiltersConfig
-import dev.slimevr.config.HIDConfig
 import dev.slimevr.config.LegTweaksConfig
-import dev.slimevr.config.OSCConfig
 import dev.slimevr.config.ResetsConfig
 import dev.slimevr.config.SkeletonConfig
 import dev.slimevr.config.StayAlignedConfig
 import dev.slimevr.config.TapDetectionConfig
-import dev.slimevr.config.VMCConfig
-import dev.slimevr.config.VRCOSCConfig
 import dev.slimevr.config.VelocityConfig
 import dev.slimevr.filtering.TrackerFilters.Companion.getByConfigkey
 import dev.slimevr.tracking.processor.HumanPoseManager
 import dev.slimevr.tracking.processor.config.SkeletonConfigToggles
 import dev.slimevr.tracking.processor.config.SkeletonConfigValues
-import dev.slimevr.tracking.trackers.TrackerRole
 import solarxr_protocol.rpc.AutoBoneSettings
 import solarxr_protocol.rpc.DriftCompensationSettings
 import solarxr_protocol.rpc.FilteringSettings
-import solarxr_protocol.rpc.HIDSettings
-import solarxr_protocol.rpc.OSCRouterSettings
-import solarxr_protocol.rpc.OSCSettings
-import solarxr_protocol.rpc.OSCTrackersSetting
 import solarxr_protocol.rpc.ResetsSettings
 import solarxr_protocol.rpc.SettingsResponse
 import solarxr_protocol.rpc.StayAlignedSettings
-import solarxr_protocol.rpc.SteamVRTrackersSetting
 import solarxr_protocol.rpc.TapDetectionSettings
-import solarxr_protocol.rpc.VMCOSCSettings
-import solarxr_protocol.rpc.VRCOSCSettings
-import solarxr_protocol.rpc.VRMSettings
 import solarxr_protocol.rpc.VelocitySettings
 import solarxr_protocol.rpc.settings.LegTweaksSettings
 import solarxr_protocol.rpc.settings.ModelRatios
 import solarxr_protocol.rpc.settings.ModelSettings
 import solarxr_protocol.rpc.settings.ModelToggles
 import solarxr_protocol.rpc.settings.SkeletonHeight
-
-fun createOSCRouterSettings(
-	fbb: FlatBufferBuilder,
-	config: OSCConfig,
-): Int {
-	val addressStringOffset = fbb.createString(config.address)
-
-	val oscSettingOffset = OSCSettings
-		.createOSCSettings(
-			fbb,
-			config.enabled,
-			config.portIn,
-			config.portOut,
-			addressStringOffset,
-		)
-
-	OSCRouterSettings.startOSCRouterSettings(fbb)
-	OSCRouterSettings.addOscSettings(fbb, oscSettingOffset)
-
-	return OSCRouterSettings.endOSCRouterSettings(fbb)
-}
-
-fun createVRCOSCSettings(
-	fbb: FlatBufferBuilder,
-	config: VRCOSCConfig,
-): Int {
-	val addressStringOffset = fbb.createString(config.address)
-	val generalSettingOffset = OSCSettings
-		.createOSCSettings(
-			fbb,
-			config.enabled,
-			config.portIn,
-			config.portOut,
-			addressStringOffset,
-		)
-	val oscSettingOffset = OSCTrackersSetting
-		.createOSCTrackersSetting(
-			fbb,
-			config.getOSCTrackerRole(TrackerRole.HEAD, false),
-			config.getOSCTrackerRole(TrackerRole.CHEST, false),
-			config.getOSCTrackerRole(TrackerRole.WAIST, false),
-			config.getOSCTrackerRole(TrackerRole.LEFT_KNEE, false) &&
-				config.getOSCTrackerRole(TrackerRole.RIGHT_KNEE, false),
-			config.getOSCTrackerRole(TrackerRole.LEFT_FOOT, false) &&
-				config.getOSCTrackerRole(TrackerRole.RIGHT_FOOT, false),
-			config.getOSCTrackerRole(TrackerRole.LEFT_ELBOW, false) &&
-				config.getOSCTrackerRole(TrackerRole.RIGHT_ELBOW, false),
-			config.getOSCTrackerRole(TrackerRole.LEFT_HAND, false) &&
-				config.getOSCTrackerRole(TrackerRole.RIGHT_HAND, false),
-		)
-	VRCOSCSettings.startVRCOSCSettings(fbb)
-	VRCOSCSettings.addOscSettings(fbb, generalSettingOffset)
-	VRCOSCSettings.addTrackers(fbb, oscSettingOffset)
-	VRCOSCSettings.addOscqueryEnabled(fbb, config.oscqueryEnabled)
-
-	return VRCOSCSettings.endVRCOSCSettings(fbb)
-}
-
-fun createVMCOSCSettings(
-	fbb: FlatBufferBuilder,
-	config: VMCConfig,
-): Int {
-	val addressStringOffset = fbb.createString(config.address)
-	val generalSettingOffset = OSCSettings
-		.createOSCSettings(
-			fbb,
-			config.enabled,
-			config.portIn,
-			config.portOut,
-			addressStringOffset,
-		)
-
-	VMCOSCSettings.startVMCOSCSettings(fbb)
-	VMCOSCSettings.addOscSettings(fbb, generalSettingOffset)
-	VMCOSCSettings.addAnchorHip(fbb, config.anchorHip)
-	VMCOSCSettings.addMirrorTracking(fbb, config.mirrorTracking)
-
-	return VMCOSCSettings.endVMCOSCSettings(fbb)
-}
-
-fun createVRMSettings(
-	fbb: FlatBufferBuilder,
-	config: VMCConfig,
-): Int {
-	val vrmJson = config.vrmJson
-	var vrmJsonOffset = 0
-	if (vrmJson != null) vrmJsonOffset = fbb.createString(vrmJson)
-
-	VRMSettings.startVRMSettings(fbb)
-	if (vrmJson != null) VRMSettings.addVrmJson(fbb, vrmJsonOffset)
-	return VRMSettings.endVRMSettings(fbb)
-}
 
 fun createFilterSettings(
 	fbb: FlatBufferBuilder,
@@ -178,29 +72,6 @@ fun createTapDetectionSettings(
 		tapDetectionConfig.fullResetTracker.bodyPart,
 		tapDetectionConfig.mountingResetTracker.bodyPart,
 	)
-
-fun createSteamVRSettings(fbb: FlatBufferBuilder, bridge: ISteamVRBridge?): Int {
-	var steamvrTrackerSettings = 0
-	if (bridge != null) {
-		steamvrTrackerSettings = SteamVRTrackersSetting
-			.createSteamVRTrackersSetting(
-				fbb,
-				bridge.getShareSetting(TrackerRole.WAIST),
-				bridge.getShareSetting(TrackerRole.CHEST),
-				bridge.getAutomaticSharedTrackers(),
-
-				bridge.getShareSetting(TrackerRole.LEFT_FOOT),
-				bridge.getShareSetting(TrackerRole.RIGHT_FOOT),
-				bridge.getShareSetting(TrackerRole.LEFT_KNEE),
-				bridge.getShareSetting(TrackerRole.RIGHT_KNEE),
-				bridge.getShareSetting(TrackerRole.LEFT_ELBOW),
-				bridge.getShareSetting(TrackerRole.RIGHT_ELBOW),
-				bridge.getShareSetting(TrackerRole.LEFT_HAND),
-				bridge.getShareSetting(TrackerRole.RIGHT_HAND),
-			)
-	}
-	return steamvrTrackerSettings
-}
 
 fun createModelSettings(
 	fbb: FlatBufferBuilder,
@@ -386,14 +257,10 @@ fun createArmsResetModeSettings(
 	)
 
 fun createSettingsResponse(fbb: FlatBufferBuilder, server: VRServer): Int {
-	val bridge = server.getVRBridge {
-		it is ISteamVRBridge
-	} as? ISteamVRBridge
-
 	return SettingsResponse
 		.createSettingsResponse(
 			fbb,
-			createSteamVRSettings(fbb, bridge),
+			0, // steam_vr_trackers (removed)
 			createFilterSettings(
 				fbb,
 				server.configManager.vrConfig.filters,
@@ -402,18 +269,9 @@ fun createSettingsResponse(fbb: FlatBufferBuilder, server: VRServer): Int {
 				fbb,
 				server.configManager.vrConfig.driftCompensation,
 			),
-			createOSCRouterSettings(
-				fbb,
-				server.configManager.vrConfig.oscRouter,
-			),
-			createVRCOSCSettings(
-				fbb,
-				server.configManager.vrConfig.vrcOSC,
-			),
-			createVMCOSCSettings(
-				fbb,
-				server.configManager.vrConfig.vmc,
-			),
+			0, // osc_router (removed)
+			0, // vrc_osc (removed)
+			0, // vmc_osc (removed)
 			createModelSettings(
 				fbb,
 				server.humanPoseManager,
@@ -436,13 +294,10 @@ fun createSettingsResponse(fbb: FlatBufferBuilder, server: VRServer): Int {
 				fbb,
 				server.configManager.vrConfig.stayAlignedConfig,
 			),
-			createHIDSettings(fbb, server.configManager.vrConfig.hidConfig),
-			0,
+			0, // hid_settings (removed)
+			0, // timeout (unused)
 			createVelocitySettings(fbb, server.configManager.vrConfig.velocityConfig),
-			createVRMSettings(
-				fbb,
-				server.configManager.vrConfig.vmc,
-			),
+			0, // vrm (removed)
 		)
 }
 
@@ -468,15 +323,6 @@ fun createStayAlignedSettings(
 		config.flatRelaxedPose.lowerLegAngleInDeg,
 		config.flatRelaxedPose.footAngleInDeg,
 		config.setupComplete,
-	)
-
-fun createHIDSettings(
-	fbb: FlatBufferBuilder,
-	config: HIDConfig,
-): Int = HIDSettings
-	.createHIDSettings(
-		fbb,
-		config.trackersOverHID,
 	)
 
 fun createVelocitySettings(

@@ -12,29 +12,6 @@ driftCompensation:
   prediction: false
   amount: 0.8
   maxResets: 6
-oscRouter:
-  enabled: false
-  portIn: 9002
-  portOut: 9000
-  address: "127.0.0.1"
-vrcOSC:
-  enabled: false
-  portIn: 9001
-  portOut: 9000
-  address: "127.0.0.1"
-  trackers:
-    right_foot: true
-    left_foot: true
-    waist: true
-  oscqueryEnabled: true
-vmc:
-  enabled: false
-  portIn: 39540
-  portOut: 39539
-  address: "127.0.0.1"
-  anchorHip: true
-  vrmJson: null
-  mirrorTracking: false
 autoBone:
   cursorIncrement: 2
   minDataDistance: 1
@@ -60,17 +37,6 @@ autoBone:
   randSeed: 4
   useFrameFiltering: false
   maxFinalError: 0.03
-keybindings:
-  fullResetBinding: "CTRL+ALT+SHIFT+Y"
-  yawResetBinding: "CTRL+ALT+SHIFT+U"
-  mountingResetBinding: "CTRL+ALT+SHIFT+I"
-  feetMountingResetBinding: "CTRL+ALT+SHIFT+P"
-  pauseTrackingBinding: "CTRL+ALT+SHIFT+O"
-  fullResetDelay: 0
-  yawResetDelay: 0
-  mountingResetDelay: 0
-  feetMountingResetDelay: 0
-  pauseTrackingDelay: 0
 skeleton:
   toggles: {}
   values: {}

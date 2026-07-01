@@ -1,7 +1,6 @@
 package dev.slimevr.bridge
 
 import dev.slimevr.tracking.trackers.Tracker
-import dev.slimevr.tracking.trackers.TrackerRole
 import dev.slimevr.util.ann.VRServerThread
 
 /**
@@ -45,17 +44,4 @@ interface Bridge {
 	fun stopBridge()
 
 	fun isConnected(): Boolean
-}
-
-interface ISteamVRBridge : Bridge {
-	fun getShareSetting(role: TrackerRole): Boolean
-
-	fun changeShareSettings(role: TrackerRole?, share: Boolean)
-
-	fun updateShareSettingsAutomatically(): Boolean
-
-	fun getAutomaticSharedTrackers(): Boolean
-	fun setAutomaticSharedTrackers(value: Boolean)
-
-	fun getBridgeConfigKey(): String
 }

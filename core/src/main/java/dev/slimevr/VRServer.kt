@@ -3,36 +3,18 @@ package dev.slimevr
 import com.jme3.system.NanoTimer
 import dev.slimevr.autobone.AutoBoneHandler
 import dev.slimevr.bridge.Bridge
-import dev.slimevr.bridge.ISteamVRBridge
 import dev.slimevr.config.ConfigManager
-import dev.slimevr.firmware.FirmwareUpdateHandler
-import dev.slimevr.firmware.SerialFlashingHandler
-import dev.slimevr.games.vrchat.VRCConfigHandler
-import dev.slimevr.games.vrchat.VRCConfigHandlerStub
-import dev.slimevr.games.vrchat.VRChatConfigManager
-import dev.slimevr.guards.ServerGuards
-import dev.slimevr.osc.OSCHandler
-import dev.slimevr.osc.OSCRouter
-import dev.slimevr.osc.VMCHandler
-import dev.slimevr.osc.VRCOSCHandler
-import dev.slimevr.posestreamer.BVHRecorder
 import dev.slimevr.protocol.ProtocolAPI
 import dev.slimevr.protocol.rpc.TransactionInfo
-import dev.slimevr.protocol.rpc.settings.RPCSettingsHandler
 import dev.slimevr.reset.ResetHandler
 import dev.slimevr.reset.ResetTimerManager
 import dev.slimevr.reset.resetTimer
-import dev.slimevr.serial.ProvisioningHandler
-import dev.slimevr.serial.SerialHandler
-import dev.slimevr.serial.SerialHandlerStub
 import dev.slimevr.setup.HandshakeHandler
 import dev.slimevr.setup.TapSetupHandler
-import dev.slimevr.status.StatusSystem
 import dev.slimevr.tracking.processor.HumanPoseManager
 import dev.slimevr.tracking.processor.skeleton.HumanSkeleton
 import dev.slimevr.tracking.trackers.*
 import dev.slimevr.tracking.trackers.udp.TrackersUDPServer
-import dev.slimevr.trackingchecklist.TrackingChecklistManager
 import dev.slimevr.util.ann.VRServerThread
 import dev.slimevr.websocketapi.WebSocketVRBridge
 import dev.slimevr.websocketapi.WebsocketAPI
@@ -59,11 +41,6 @@ const val SLIMEVR_IDENTIFIER = "dev.slimevr.SlimeVR"
 
 class VRServer @JvmOverloads constructor(
 	bridgeProvider: BridgeProvider = { _, _ -> sequence {} },
-	featureFlagsProvider: (VRServer) -> FeatureFlags = { _ -> FeatureFlags() },
-	serialHandlerProvider: (VRServer) -> SerialHandler = { _ -> SerialHandlerStub() },
-	flashingHandlerProvider: (VRServer) -> SerialFlashingHandler? = { _ -> null },
-	vrcConfigHandlerProvider: (VRServer) -> VRCConfigHandler = { _ -> VRCConfigHandlerStub() },
-	networkProfileProvider: (VRServer) -> NetworkProfileChecker = { _ -> StubNetworkProfileChecker() },
 	val processListProvider: () -> Sequence<Process> = { emptySequence() },
 	val tryOpenUri: (String) -> Unit = {},
 	acquireMulticastLock: () -> Any? = { null },
@@ -80,29 +57,9 @@ class VRServer @JvmOverloads constructor(
 	private val trackerStatusListeners: MutableList<TrackerStatusListener> = FastList()
 	private val onTick: MutableList<Runnable> = FastList()
 	private val lock = acquireMulticastLock()
-	val oSCRouter: OSCRouter
-
-	@JvmField
-	val vrcOSCHandler: VRCOSCHandler
-	val vMCHandler: VMCHandler
 
 	@JvmField
 	val deviceManager: DeviceManager
-
-	// UwU
-	val featureFlags: FeatureFlags = featureFlagsProvider(this)
-
-	@JvmField
-	val bvhRecorder: BVHRecorder
-
-	@JvmField
-	val serialHandler: SerialHandler
-
-	var serialFlashingHandler: SerialFlashingHandler?
-
-	val firmwareUpdateHandler: FirmwareUpdateHandler
-
-	val vrcConfigManager: VRChatConfigManager
 
 	@JvmField
 	val autoBoneHandler: AutoBoneHandler
@@ -117,39 +74,20 @@ class VRServer @JvmOverloads constructor(
 	val fpsTimer = NanoTimer()
 
 	@JvmField
-	val provisioningHandler: ProvisioningHandler
-
-	@JvmField
 	val resetHandler: ResetHandler
 
 	@JvmField
-	val statusSystem = StatusSystem()
-
-	@JvmField
 	val handshakeHandler = HandshakeHandler()
-
-	val trackingChecklistManager: TrackingChecklistManager
-
-	val networkProfileChecker: NetworkProfileChecker
-
-	val serverGuards = ServerGuards()
 
 	// WebSocket API server instance (nullable)
 	private val websocketAPI: WebsocketAPI?
 
 	init {
 		deviceManager = DeviceManager(this)
-		serialHandler = serialHandlerProvider(this)
-		serialFlashingHandler = flashingHandlerProvider(this)
-		provisioningHandler = ProvisioningHandler(this)
 		resetHandler = ResetHandler()
 		tapSetupHandler = TapSetupHandler()
 		humanPoseManager = HumanPoseManager(this)
 		autoBoneHandler = AutoBoneHandler(this)
-		firmwareUpdateHandler = FirmwareUpdateHandler(this)
-		vrcConfigManager = VRChatConfigManager(this, vrcConfigHandlerProvider(this))
-		networkProfileChecker = networkProfileProvider(this)
-		trackingChecklistManager = TrackingChecklistManager(this)
 		protocolAPI = ProtocolAPI(this)
 		val computedTrackers = humanPoseManager.computedTrackers
 
@@ -176,14 +114,6 @@ class VRServer @JvmOverloads constructor(
 			null
 		}
 
-		vrcOSCHandler = VRCOSCHandler(this, configManager.vrConfig.vrcOSC, computedTrackers)
-		vMCHandler = VMCHandler(this, humanPoseManager, configManager.vrConfig.vmc)
-
-		val oscHandlers = FastList<OSCHandler>()
-		oscHandlers.add(vrcOSCHandler)
-		oscHandlers.add(vMCHandler)
-		oSCRouter = OSCRouter(configManager.vrConfig.oscRouter, oscHandlers)
-		bvhRecorder = BVHRecorder(this)
 		for (tracker in computedTrackers) {
 			registerTracker(tracker)
 		}
@@ -308,8 +238,6 @@ class VRServer @JvmOverloads constructor(
 			for (bridge in bridges) {
 				bridge.dataWrite()
 			}
-			vrcOSCHandler.update()
-			vMCHandler.update()
 			try {
 				sleep(1) // 1000Hz
 			} catch (error: InterruptedException) {
@@ -328,9 +256,6 @@ class VRServer @JvmOverloads constructor(
 	private fun trackerAdded(tracker: Tracker) {
 		humanPoseManager.trackerAdded(tracker)
 		updateSkeletonModel()
-		if (tracker.isComputed) {
-			vMCHandler.addComputedTracker(tracker)
-		}
 		refreshTrackersDriftCompensationEnabled()
 	}
 
@@ -350,13 +275,6 @@ class VRServer @JvmOverloads constructor(
 	fun updateSkeletonModel() {
 		queueTask {
 			humanPoseManager.updateSkeletonModelFromServer()
-			vrcOSCHandler.setHeadTracker(TrackerUtils.getTrackerForSkeleton(trackers, TrackerPosition.HEAD))
-
-			val bridge = this.getVRBridge {
-				it is ISteamVRBridge
-			} as? ISteamVRBridge
-			bridge?.updateShareSettingsAutomatically()
-			RPCSettingsHandler.sendSteamVRUpdatedSettings(protocolAPI, protocolAPI.rpcHandler)
 		}
 	}
 
@@ -381,22 +299,12 @@ class VRServer @JvmOverloads constructor(
 	fun setPauseTracking(pauseTracking: Boolean, sourceName: String?) {
 		queueTask {
 			humanPoseManager.setPauseTracking(pauseTracking, sourceName)
-			val bridge = this.getVRBridge {
-				it is ISteamVRBridge
-			} as? ISteamVRBridge
-			bridge?.updateShareSettingsAutomatically()
-			RPCSettingsHandler.sendSteamVRUpdatedSettings(protocolAPI, protocolAPI.rpcHandler)
 		}
 	}
 
 	fun togglePauseTracking(sourceName: String?) {
 		queueTask {
 			humanPoseManager.togglePauseTracking(sourceName)
-			val bridge = this.getVRBridge {
-				it is ISteamVRBridge
-			} as? ISteamVRBridge
-			bridge?.updateShareSettingsAutomatically()
-			RPCSettingsHandler.sendSteamVRUpdatedSettings(protocolAPI, protocolAPI.rpcHandler)
 		}
 	}
 

@@ -7,7 +7,6 @@ import com.github.jonpeterson.jackson.module.versioning.JsonVersionedModel
 import dev.slimevr.config.serializers.BridgeConfigMapDeserializer
 import dev.slimevr.config.serializers.TrackerConfigMapDeserializer
 import dev.slimevr.tracking.trackers.Tracker
-import dev.slimevr.tracking.trackers.TrackerRole
 
 @JsonVersionedModel(
 	currentVersion = "15",
@@ -21,16 +20,7 @@ class VRConfig {
 
 	val driftCompensation: DriftCompensationConfig = DriftCompensationConfig()
 
-	val oscRouter: OSCConfig = OSCConfig()
-
-	val vrcOSC: VRCOSCConfig = VRCOSCConfig()
-
-	@get:JvmName("getVMC")
-	val vmc: VMCConfig = VMCConfig()
-
 	val autoBone: AutoBoneConfig = AutoBoneConfig()
-
-	val keybindings: KeybindingsConfig = KeybindingsConfig()
 
 	val skeleton: SkeletonConfig = SkeletonConfig()
 
@@ -42,8 +32,6 @@ class VRConfig {
 
 	val stayAlignedConfig = StayAlignedConfig()
 
-	val hidConfig = HIDConfig()
-
 	@JsonDeserialize(using = TrackerConfigMapDeserializer::class)
 	@JsonSerialize(keyUsing = StdKeySerializers.StringKeySerializer::class)
 	private val trackers: MutableMap<String, TrackerConfig> = HashMap()
@@ -54,42 +42,7 @@ class VRConfig {
 
 	val knownDevices: MutableSet<String> = mutableSetOf()
 
-	val overlay: OverlayConfig = OverlayConfig()
-
-	val trackingChecklist: TrackingChecklistConfig = TrackingChecklistConfig()
-
 	val velocityConfig: VelocityConfig = VelocityConfig()
-
-	val vrcConfig: VRCConfig = VRCConfig()
-
-	init {
-		// Initialize default settings for OSC Router
-		oscRouter.portIn = 9002
-		oscRouter.portOut = 9000
-
-		// Initialize default settings for VRC OSC
-		vrcOSC.portIn = 9001
-		vrcOSC.portOut = 9000
-		vrcOSC
-			.setOSCTrackerRole(
-				TrackerRole.WAIST,
-				vrcOSC.getOSCTrackerRole(TrackerRole.WAIST, true),
-			)
-		vrcOSC
-			.setOSCTrackerRole(
-				TrackerRole.LEFT_FOOT,
-				vrcOSC.getOSCTrackerRole(TrackerRole.WAIST, true),
-			)
-		vrcOSC
-			.setOSCTrackerRole(
-				TrackerRole.RIGHT_FOOT,
-				vrcOSC.getOSCTrackerRole(TrackerRole.WAIST, true),
-			)
-
-		// Initialize default settings for VMC
-		vmc.portIn = 39540
-		vmc.portOut = 39539
-	}
 
 	fun getTrackers(): Map<String, TrackerConfig> = trackers
 

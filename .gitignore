@@ -8,6 +8,7 @@ out/
 *.class
 *.jar
 *.war
+*.vite
 
 # --- Kotlin ---
 .kotlin/

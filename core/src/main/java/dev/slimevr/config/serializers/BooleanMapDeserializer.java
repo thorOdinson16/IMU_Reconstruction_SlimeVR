@@ -1,15 +1,26 @@
 package dev.slimevr.config.serializers;
 
-/**
- * This class allows the use of the utility super class MapDeserializer that
- * takes the Value of a map as its Generic parameter. It is so you can use that
- * class in a @JsonDeserialize annotation on the Map field inside the config
- * instance
- *
- * @see dev.slimevr.config.VRConfig
- */
-public class BooleanMapDeserializer extends MapDeserializer<Boolean> {
-	public BooleanMapDeserializer() {
-		super(Boolean.class);
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.JsonNode;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+
+public class BooleanMapDeserializer extends JsonDeserializer<Map<String, Boolean>> {
+	@Override
+	public Map<String, Boolean> deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
+		JsonNode node = p.getCodec().readTree(p);
+		Map<String, Boolean> map = new HashMap<>();
+		if (node.isObject()) {
+			Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+			while (fields.hasNext()) {
+				Map.Entry<String, JsonNode> entry = fields.next();
+				map.put(entry.getKey(), entry.getValue().asBoolean());
+			}
+		}
+		return map;
 	}
 }

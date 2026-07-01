@@ -1,7 +1,6 @@
 package dev.slimevr.protocol.rpc.settings
 
 import com.google.flatbuffers.FlatBufferBuilder
-import dev.slimevr.bridge.ISteamVRBridge
 import dev.slimevr.config.ArmsResetModes
 import dev.slimevr.filtering.TrackerFilters
 import dev.slimevr.protocol.GenericConnection
@@ -10,11 +9,9 @@ import dev.slimevr.protocol.rpc.RPCHandler
 import dev.slimevr.tracking.processor.config.SkeletonConfigToggles
 import dev.slimevr.tracking.processor.config.SkeletonConfigValues
 import dev.slimevr.tracking.trackers.TrackerPosition
-import dev.slimevr.tracking.trackers.TrackerRole
 import solarxr_protocol.rpc.ChangeSettingsRequest
 import solarxr_protocol.rpc.RpcMessage
 import solarxr_protocol.rpc.RpcMessageHeader
-import solarxr_protocol.rpc.SettingsResponse
 import kotlin.math.*
 
 class RPCSettingsHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) {
@@ -31,27 +28,6 @@ class RPCSettingsHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) {
 	fun onChangeSettingsRequest(conn: GenericConnection?, messageHeader: RpcMessageHeader) {
 		val req = messageHeader
 			.message(ChangeSettingsRequest()) as? ChangeSettingsRequest ?: return
-
-		if (req.steamVrTrackers() != null) {
-			val bridge = api.server.getVRBridge {
-				it is ISteamVRBridge
-			} as? ISteamVRBridge
-
-			if (bridge != null) {
-				bridge.changeShareSettings(TrackerRole.WAIST, req.steamVrTrackers().waist())
-				bridge.changeShareSettings(TrackerRole.CHEST, req.steamVrTrackers().chest())
-				bridge.changeShareSettings(TrackerRole.LEFT_FOOT, req.steamVrTrackers().leftFoot())
-				bridge.changeShareSettings(TrackerRole.RIGHT_FOOT, req.steamVrTrackers().rightFoot())
-				bridge.changeShareSettings(TrackerRole.LEFT_KNEE, req.steamVrTrackers().leftKnee())
-				bridge.changeShareSettings(TrackerRole.RIGHT_KNEE, req.steamVrTrackers().rightKnee())
-				bridge.changeShareSettings(TrackerRole.LEFT_ELBOW, req.steamVrTrackers().leftElbow())
-				bridge.changeShareSettings(TrackerRole.RIGHT_ELBOW, req.steamVrTrackers().rightElbow())
-				bridge.changeShareSettings(TrackerRole.LEFT_HAND, req.steamVrTrackers().leftHand())
-				bridge.changeShareSettings(TrackerRole.RIGHT_HAND, req.steamVrTrackers().rightHand())
-				bridge.setAutomaticSharedTrackers(req.steamVrTrackers().automaticTrackerToggle())
-				sendSteamVRUpdatedSettings(api, rpcHandler)
-			}
-		}
 
 		if (req.filtering() != null) {
 			val type = TrackerFilters.fromId(req.filtering().type())
@@ -74,84 +50,6 @@ class RPCSettingsHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) {
 			driftCompensationConfig.amount = req.driftCompensation().amount()
 			driftCompensationConfig.maxResets = req.driftCompensation().maxResets()
 			driftCompensationConfig.updateTrackersDriftCompensation()
-		}
-
-		if (req.oscRouter() != null) {
-			val oscRouterConfig = api.server.configManager
-				.vrConfig
-				.oscRouter
-			val oscRouter = api.server.oSCRouter
-			val osc = req.oscRouter().oscSettings()
-			if (osc != null) {
-				oscRouterConfig.enabled = osc.enabled()
-				oscRouterConfig.portIn = osc.portIn()
-				oscRouterConfig.portOut = osc.portOut()
-				oscRouterConfig.address = osc.address()
-			}
-
-			oscRouter.refreshSettings(true)
-		}
-
-		if (req.vrcOsc() != null) {
-			val vrcOSCConfig = api.server.configManager
-				.vrConfig
-				.vrcOSC
-			val vrcOscHandler = api.server.vrcOSCHandler
-			val osc = req.vrcOsc().oscSettings()
-			val trackers = req.vrcOsc().trackers()
-
-			if (osc != null) {
-				vrcOSCConfig.enabled = osc.enabled()
-				vrcOSCConfig.portIn = osc.portIn()
-				vrcOSCConfig.portOut = osc.portOut()
-				vrcOSCConfig.address = osc.address()
-			}
-			if (trackers != null) {
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.HEAD, trackers.head())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.CHEST, trackers.chest())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.WAIST, trackers.waist())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.LEFT_KNEE, trackers.knees())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.RIGHT_KNEE, trackers.knees())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.LEFT_FOOT, trackers.feet())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.RIGHT_FOOT, trackers.feet())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.LEFT_ELBOW, trackers.elbows())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.RIGHT_ELBOW, trackers.elbows())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.LEFT_HAND, trackers.hands())
-				vrcOSCConfig.setOSCTrackerRole(TrackerRole.RIGHT_HAND, trackers.hands())
-			}
-			vrcOSCConfig.oscqueryEnabled = req.vrcOsc().oscqueryEnabled()
-
-			vrcOscHandler.refreshSettings(true)
-		}
-
-		if (req.vmcOsc() != null) {
-			val vmcConfig = api.server.configManager
-				.vrConfig
-				.vmc
-			val osc = req.vmcOsc().oscSettings()
-
-			if (osc != null) {
-				vmcConfig.enabled = osc.enabled()
-				vmcConfig.portIn = osc.portIn()
-				vmcConfig.portOut = osc.portOut()
-				vmcConfig.address = osc.address()
-			}
-			vmcConfig.anchorHip = req.vmcOsc().anchorHip()
-			vmcConfig.mirrorTracking = req.vmcOsc().mirrorTracking()
-		}
-
-		if (req.vrm() != null) {
-			val vmcConfig = api.server.configManager
-				.vrConfig
-				.vmc
-			if (req.vrm().vrmJson() != null) {
-				vmcConfig.vrmJson = req.vrm().vrmJson().ifEmpty { null }
-			}
-		}
-
-		if (req.vmcOsc() != null || req.vrm() != null) {
-			val vmcHandler = api.server.vMCHandler
-			vmcHandler.refreshSettings(true)
 		}
 
 		if (req.tapDetectionSettings() != null) {
@@ -369,12 +267,6 @@ class RPCSettingsHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) {
 			config.flatRelaxedPose.footAngleInDeg = requestConfig.flatFootAngle()
 		}
 
-		if (req.hidSettings() != null) {
-			val config = api.server.configManager.vrConfig.hidConfig
-			val requestConfig = req.hidSettings()
-			config.trackersOverHID = requestConfig.trackersOverHid()
-		}
-
 		if (req.velocitySettings() != null) {
 			val velocityConfig = api.server.configManager.vrConfig.velocityConfig
 			velocityConfig.sendDerivedVelocity = req.velocitySettings().sendDerivedVelocity()
@@ -388,24 +280,4 @@ class RPCSettingsHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) {
 		api.server.configManager.resetConfig()
 	}
 
-	companion object {
-		fun sendSteamVRUpdatedSettings(api: ProtocolAPI, rpcHandler: RPCHandler) {
-			val fbb = FlatBufferBuilder(32)
-			val bridge = api.server.getVRBridge {
-				it is ISteamVRBridge
-			} as? ISteamVRBridge ?: return
-
-			val settings = SettingsResponse
-				.createSettingsResponse(
-					fbb,
-					createSteamVRSettings(fbb, bridge), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-				)
-			val outbound =
-				rpcHandler.createRPCMessage(fbb, RpcMessage.SettingsResponse, settings)
-			fbb.finish(outbound)
-			api.apiServers.forEach { apiServer ->
-				apiServer.apiConnections.forEach { it.send(fbb.dataBuffer()) }
-			}
-		}
-	}
 }
