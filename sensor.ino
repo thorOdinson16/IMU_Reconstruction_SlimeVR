@@ -185,11 +185,30 @@ void loop() {
   }
 
   if (now - lastSend < 15) return;
-  if (!mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) return;
   lastSend = now;
 
+  // Drain the FIFO and keep only the most recent quaternion, instead of
+  // reading a single packet per loop. If the loop falls behind the DMP's
+  // internal fusion rate, reading one stale packet at a time causes the
+  // reported yaw to lag behind true orientation, then "catch up" in
+  // bursts - this integrates into extra apparent rotation over a full turn.
+  bool gotPacket = false;
   Quaternion q;
-  mpu.dmpGetQuaternion(&q, fifoBuffer);
+  uint16_t packetSize = mpu.dmpGetFIFOPacketSize();
+  while (mpu.getFIFOCount() >= packetSize) {
+    if (mpu.getFIFOCount() >= 1024) {
+      mpu.resetFIFO();
+      break;
+    }
+    if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
+      mpu.dmpGetQuaternion(&q, fifoBuffer);
+      gotPacket = true;
+    } else {
+      break;
+    }
+  }
+  if (!gotPacket) return;
+
   data.qw = q.w; data.qx = q.x; data.qy = q.y; data.qz = q.z;
   esp_now_send(HUB_MAC, (uint8_t*)&data, sizeof(data));
 }
