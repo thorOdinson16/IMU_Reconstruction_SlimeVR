@@ -27,6 +27,9 @@ import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.function.Consumer
 import kotlin.collections.HashMap
 import kotlin.coroutines.resume
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileWriter
 
 /**
  * Receives trackers data by UDP using extended owoTrack protocol.
@@ -74,6 +77,10 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	// Cache of text-parser trackers by position (avoid race with allTrackers copy)
 	private val textTrackers = java.util.concurrent.ConcurrentHashMap<TrackerPosition, Tracker>()
 
+	// Stores the most recent raw (pre-alignment) quaternion per label, needed for manual recalibration
+	private val lastRawQuat = ConcurrentHashMap<String, Quaternion>()
+	private val csvLogger = CsvLogger()
+
 	private var imuAlignmentLogged = false
 
 	/** Returns the IMU axes alignment offset from config, falling back to the default (-90° around X). */
@@ -109,7 +116,15 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	private val rawQuatLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
 	private fun parseTextPacket(msg: String) {
-		val parts = msg.trim().split(",")
+		val trimmed = msg.trim()
+
+		// Handle the "CAL" command as a manual recalibration trigger
+		if (trimmed.equals("CAL", ignoreCase = true) || trimmed.equals("CALIBRATE", ignoreCase = true)) {
+			recalibrateAll()
+			return
+		}
+
+		val parts = trimmed.split(",")
 		if (parts.size < 5) return
 		val label = parts[0]
 		val qw = parts[1].toFloatOrNull() ?: return
@@ -152,6 +167,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		}
 
 		val sensorQuat = Quaternion(qw, qy, -qx, qz)
+		lastRawQuat[label] = sensorQuat
 
 		// Auto-calibrate imuAlignment from the first sensor reading (assumes user is
 		// standing straight and facing forward at startup). Once set, all subsequent
@@ -162,6 +178,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 			val alignment = mounting.inv() * sensorQuat.inv()
 			autoImuAlignments[label] = alignment
 			LogManager.info("[TrackerServer] Auto-calibrated imuAlignment from $label: w=${alignment.w} x=${alignment.x} y=${alignment.y} z=${alignment.z}")
+			csvLogger.logEvent("CALIBRATED_$label")
 		}
 
 		// Log the first raw quaternion for each tracker
@@ -177,6 +194,8 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		// Ensure per-body-part mounting orientation is applied (constructor doesn't
 		// trigger the observable setter that sets body-part-specific defaults)
 		tracker.resetsHandler.mountingOrientation = position.defaultMounting()
+
+		csvLogger.logUpdate(label, slimevrQuat)
 	}
 	// ---------- End custom parser ----------
 
@@ -686,6 +705,8 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 							RESET_SOURCE_NAME,
 							(VRServer.instance.configManager.vrConfig.resetsConfig.fullResetDelay * 1000).toLong(),
 						)
+						// Log a "CALIBERATED ALL" event when full reset is triggered
+						csvLogger.logEvent("CALIBERATED ALL")
 					}
 
 					UDPPacket21UserAction.RESET_YAW -> {
@@ -780,6 +801,201 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		)
 	}
 
+	private fun recalibrateAll() {
+		for ((label, position) in labelToPosition) {
+			val raw = lastRawQuat[label] ?: continue
+			val mounting = position.defaultMounting()
+			val alignment = mounting.inv() * raw.inv()
+			autoImuAlignments[label] = alignment
+			LogManager.info("[TrackerServer] Recalibrated $label: w=${alignment.w} x=${alignment.x} y=${alignment.y} z=${alignment.z}")
+		}
+		csvLogger.logEvent("CALIBERATED_ALL")
+		LogManager.info("[TrackerServer] Manual recalibration (CAL) triggered for all active trackers")
+	}
+
+	/**
+	 * Logs a custom event to the CSV log file.
+	 * @param event The event name to write.
+	 */
+	fun logCsvEvent(event: String) {
+		csvLogger.logEvent(event)
+	}
+
+	/**
+	 * Dynamic CSV logger: columns are added only when a sensor first appears.
+	 * The column order is: time, then for each seen sensor (in order of first appearance):
+	 *   sensor_w, sensor_x, sensor_y, sensor_z, then event.
+	 * If a new sensor appears later, the file is rewritten with the new header and all buffered rows.
+	 * Rows are written at regular intervals (50ms) or on events, combining all active sensor data.
+	 * Event rows have blank sensor data.
+	 */
+	private inner class CsvLogger {
+		private var writer: BufferedWriter? = null
+		private var file: File? = null
+		private var startNanoTime: Long = 0L
+		private var lastWriteNano: Long = 0L
+		private val writeIntervalNano = 50_000_000L // 50ms
+
+		// Dynamic column names: first "time", then sensor columns, last "event"
+		private val columns = mutableListOf("time", "event")
+		private val seenLabels = mutableSetOf<String>()
+
+		// Latest quaternion for each active sensor
+		private val latestValues = ConcurrentHashMap<String, Quaternion>()
+
+		// Buffered rows: each entry is a RowData (time, snapshot map, event)
+		private val rows = mutableListOf<RowData>()
+
+		@Synchronized
+		private fun ensureOpen() {
+			if (writer != null) return
+			val dir = File("csv")
+			if (!dir.exists()) dir.mkdirs()
+
+			var i = 1
+			var f: File
+			do {
+				f = File(dir, "run%03d.csv".format(i))
+				i++
+			} while (f.exists())
+			file = f
+			writer = BufferedWriter(FileWriter(f, false)) // overwrite
+			startNanoTime = System.nanoTime()
+			lastWriteNano = startNanoTime
+
+			// Write initial header: time,event (no sensor columns yet)
+			writeHeader()
+			writer?.flush()
+
+			LogManager.info("[TrackerServer] CSV logging started: ${f.path}")
+
+			Runtime.getRuntime().addShutdownHook(Thread { close() })
+		}
+
+		private fun writeHeader() {
+			val w = writer ?: return
+			w.appendLine(columns.joinToString(","))
+		}
+
+		/**
+		 * Called when a new sensor label appears. Adds its four columns (label_w, label_x, label_y, label_z)
+		 * before the "event" column (which is always last).
+		 */
+		private fun addNewLabel(label: String) {
+			if (label in seenLabels) return
+			seenLabels.add(label)
+			// Insert four columns before the event column (at index columns.size - 1)
+			val insertPos = columns.size - 1
+			columns.add(insertPos, "${label}_w")
+			columns.add(insertPos + 1, "${label}_x")
+			columns.add(insertPos + 2, "${label}_y")
+			columns.add(insertPos + 3, "${label}_z")
+
+			// Rewrite the entire file with the new header and all buffered rows
+			rewriteFile()
+		}
+
+		/**
+		 * Rewrites the entire CSV file with the current columns and all buffered rows.
+		 * Called when a new label is added.
+		 */
+		private fun rewriteFile() {
+			val w = writer ?: return
+			val f = file ?: return
+
+			// Flush and close current writer
+			w.flush()
+			w.close()
+
+			// Reopen in truncate mode
+			writer = BufferedWriter(FileWriter(f, false))
+			writeHeader()
+
+			// Write all buffered rows
+			for (row in rows) {
+				writeRow(row)
+			}
+			writer?.flush()
+			LogManager.debug("[TrackerServer] CSV rewrite for new sensor, ${rows.size} rows rewritten.")
+		}
+
+		/** Updates the latest quaternion for a sensor and triggers a combined row write if enough time has passed. */
+		@Synchronized
+		fun logUpdate(label: String, quat: Quaternion) {
+			ensureOpen()
+			// If this is a new label, add columns and rewrite
+			if (label !in seenLabels) {
+				addNewLabel(label)
+			}
+			latestValues[label] = quat
+
+			val now = System.nanoTime()
+			if (now - lastWriteNano >= writeIntervalNano) {
+				writeCombinedRow(null)
+				lastWriteNano = now
+			}
+		}
+
+		/** Writes a marker row with blank sensor data and only the event column set. */
+		@Synchronized
+		fun logEvent(event: String) {
+			ensureOpen()
+			val elapsed = (System.nanoTime() - startNanoTime) / 1_000_000_000.0
+			val row = RowData(elapsed, mutableMapOf(), event) // empty quaternions map
+			rows.add(row)
+			writeRow(row)
+		}
+
+		/**
+		 * Writes a combined row with the current snapshot of all sensor values.
+		 * If event is not null, the event column is set; otherwise it's empty.
+		 */
+		private fun writeCombinedRow(event: String?) {
+			val elapsed = (System.nanoTime() - startNanoTime) / 1_000_000_000.0
+			// Take a snapshot of the latest values (copy to a new map)
+			val snapshot = HashMap(latestValues)
+			val row = RowData(elapsed, snapshot, event)
+			rows.add(row)
+			writeRow(row)
+		}
+
+		/** Writes a single row to the CSV file using the current columns. */
+		private fun writeRow(row: RowData) {
+			val w = writer ?: return
+			val sb = StringBuilder()
+			// Always write time first
+			sb.append("%.6f".format(row.time))
+
+			// Write all sensor columns (from index 1 to columns.size-2, because last is "event")
+			for (i in 1 until columns.size - 1) {
+				val col = columns[i]
+				val label = col.substringBeforeLast('_')
+				val component = col.substringAfterLast('_')
+				val q = row.quaternions[label]
+				val value = when (component) {
+					"w" -> q?.w
+					"x" -> q?.x
+					"y" -> q?.y
+					"z" -> q?.z
+					else -> null
+				}
+				sb.append(",${value?.let { "%.6f".format(it) } ?: ""}")
+			}
+
+			// Write event column (last)
+			sb.append(",${row.event ?: ""}")
+			w.appendLine(sb.toString())
+			w.flush()
+		}
+
+		@Synchronized
+		fun close() {
+			writer?.flush()
+			writer?.close()
+			writer = null
+		}
+	}
+
 	companion object {
 		/**
 		 * Default IMU axes alignment offset: -90° around X, converting from the standard
@@ -818,3 +1034,12 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		}
 	}
 }
+
+/**
+ * Private class to hold a row of CSV data.
+ */
+private class RowData(
+	val time: Double,
+	val quaternions: MutableMap<String, Quaternion> = mutableMapOf(),
+	val event: String? = null
+)

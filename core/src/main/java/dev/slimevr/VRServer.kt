@@ -79,6 +79,10 @@ class VRServer @JvmOverloads constructor(
 	@JvmField
 	val handshakeHandler = HandshakeHandler()
 
+	@Volatile
+	var isCalibrated: Boolean = false
+    	private set
+
 	// WebSocket API server instance (nullable)
 	private val websocketAPI: WebsocketAPI?
 
@@ -318,6 +322,8 @@ class VRServer @JvmOverloads constructor(
 			onComplete = {
 				queueTask {
 					humanPoseManager.resetTrackersFull(resetSourceName, bodyParts)
+					// Mark as calibrated after a full reset
+					isCalibrated = true
 					resetHandler.sendFinished(ResetType.Full, tx, bodyParts, delay.toInt())
 				}
 			},

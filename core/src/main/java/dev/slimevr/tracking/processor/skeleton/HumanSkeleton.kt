@@ -1575,6 +1575,11 @@ class HumanSkeleton(
 		localizer.reset()
 		ikSolver.resetOffsets()
 		LogManager.info("[HumanSkeleton] Reset: full ($resetSourceName)")
+
+		// Log CSV event only for GUI-triggered full resets
+		if (resetSourceName == "WebSocketAPI") {
+			humanPoseManager.server?.trackersServer?.logCsvEvent("CALIBERATED")
+		}
 	}
 
 	@VRServerThread

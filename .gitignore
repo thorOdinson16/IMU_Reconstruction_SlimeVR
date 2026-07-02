@@ -38,5 +38,6 @@ Desktop.ini
 
 # --- Generated / scratch ---
 repomix-output.md
+csv/
 *.log
 .env.local
