@@ -115,7 +115,7 @@ export class MocapScene {
   // applied as deltas on top of these, so identity server rotations keep the
   // model in its natural default pose.
   private bindPoseWorld = new Map<BodyPart, THREE.Quaternion>();
-  private bindPoseLocal = new Map<BodyPart, THREE.Quaternion>();
+
   private parentWorldInv = new THREE.Quaternion();
   private worldQuat = new THREE.Quaternion();
   private desiredWorld = new THREE.Quaternion();
@@ -246,7 +246,6 @@ export class MocapScene {
         const bone = bones.find((b) => b.name === boneName);
         if (bone) {
           this.mixamoBones.set(Number(bodyPart) as BodyPart, bone);
-          this.bindPoseLocal.set(Number(bodyPart) as BodyPart, bone.quaternion.clone()); // NEW
         }
       }
 
@@ -277,81 +276,75 @@ export class MocapScene {
   }
 
   private applyMixamoPose(bones: BoneT[]) {
-      const rootBone = this.mixamoBones.get(BodyPart.HIP);
-      if (!rootBone) return;
+    const rootBone = this.mixamoBones.get(BodyPart.HIP);
+    if (!rootBone) return;
 
-      const dataByPart = new Map<BodyPart, BoneT>();
-      for (const b of bones) dataByPart.set(b.bodyPart, b);
+    const dataByPart = new Map<BodyPart, BoneT>();
+    for (const b of bones) dataByPart.set(b.bodyPart, b);
 
-      const rootData = dataByPart.get(BodyPart.HIP);
-      if (rootData && rootData.headPositionG) {
-        rootBone.position.set(rootData.headPositionG.x, rootData.headPositionG.y, rootData.headPositionG.z);
+    const rootData = dataByPart.get(BodyPart.HIP);
+    if (rootData && rootData.headPositionG) {
+      rootBone.position.set(rootData.headPositionG.x, rootData.headPositionG.y, rootData.headPositionG.z);
+    }
+
+    const order: BodyPart[] = [
+      BodyPart.HIP,
+      BodyPart.WAIST,
+      BodyPart.CHEST,
+      BodyPart.UPPER_CHEST,
+      BodyPart.NECK,
+      BodyPart.HEAD,
+      // LEFT_SHOULDER / RIGHT_SHOULDER intentionally omitted — no shoulder
+      // trackers, so this bone stays at its bind-pose rotation instead of
+      // inheriting synthetic chest rotation from the server.
+      BodyPart.LEFT_UPPER_ARM,
+      BodyPart.LEFT_LOWER_ARM,
+      BodyPart.LEFT_HAND,
+      BodyPart.RIGHT_UPPER_ARM,
+      BodyPart.RIGHT_LOWER_ARM,
+      BodyPart.RIGHT_HAND,
+      BodyPart.LEFT_UPPER_LEG,
+      BodyPart.LEFT_LOWER_LEG,
+      BodyPart.LEFT_FOOT,
+      BodyPart.RIGHT_UPPER_LEG,
+      BodyPart.RIGHT_LOWER_LEG,
+      BodyPart.RIGHT_FOOT,
+    ];
+
+    for (const bp of order) {
+      const mixamoBone = this.mixamoBones.get(bp);
+      if (!mixamoBone) continue;
+
+      const data = dataByPart.get(bp);
+      if (!data || !data.rotationG) {
+        // No tracker/computed data for this bone this frame — hold at rest pose
+        mixamoBone.quaternion.identity();
+        continue;
       }
 
-      const order: BodyPart[] = [
-        BodyPart.HIP,
-        BodyPart.WAIST,
-        BodyPart.CHEST,
-        BodyPart.UPPER_CHEST,
-        BodyPart.NECK,
-        BodyPart.HEAD,
-        BodyPart.LEFT_UPPER_ARM,
-        BodyPart.LEFT_LOWER_ARM,
-        BodyPart.LEFT_HAND,
-        BodyPart.RIGHT_UPPER_ARM,
-        BodyPart.RIGHT_LOWER_ARM,
-        BodyPart.RIGHT_HAND,
-        BodyPart.LEFT_UPPER_LEG,
-        BodyPart.LEFT_LOWER_LEG,
-        BodyPart.LEFT_FOOT,
-        BodyPart.RIGHT_UPPER_LEG,
-        BodyPart.RIGHT_LOWER_LEG,
-        BodyPart.RIGHT_FOOT,
-      ];
+      this.worldQuat.set(data.rotationG.x, data.rotationG.y, data.rotationG.z, data.rotationG.w);
 
-      const usesBindOffset = new Set<BodyPart>([
-        BodyPart.LEFT_UPPER_LEG, BodyPart.LEFT_LOWER_LEG, BodyPart.LEFT_FOOT,
-        BodyPart.RIGHT_UPPER_LEG, BodyPart.RIGHT_LOWER_LEG, BodyPart.RIGHT_FOOT,
-      ]);
-
-      for (const bp of order) {
-        const mixamoBone = this.mixamoBones.get(bp);
-        if (!mixamoBone) continue;
-
-        const data = dataByPart.get(bp);
-        if (!data || !data.rotationG) {
-          const restLocal = this.bindPoseLocal.get(bp);
-          if (restLocal) mixamoBone.quaternion.copy(restLocal);
-          else mixamoBone.quaternion.identity();
-          mixamoBone.updateMatrixWorld(true);
-          continue;
-        }
-
-        this.worldQuat.set(data.rotationG.x, data.rotationG.y, data.rotationG.z, data.rotationG.w);
-        const bindWorld = this.bindPoseWorld.get(bp);
-
-        if (usesBindOffset.has(bp) && bindWorld) {
-          this.desiredWorld.copy(bindWorld).multiply(this.worldQuat);
-        } else {
-          this.desiredWorld.copy(this.worldQuat);
-        }
-
-        if (!mixamoBone.parent || !(mixamoBone.parent instanceof THREE.Bone)) {
-          mixamoBone.quaternion.copy(this.desiredWorld);
-        } else {
-          mixamoBone.parent.updateMatrixWorld(true);
-          mixamoBone.parent.getWorldQuaternion(this.parentWorldInv);
-          this.parentWorldInv.invert();
-          this.parentWorldInv.multiply(this.desiredWorld);
-          mixamoBone.quaternion.copy(this.parentWorldInv);
-        }
-
-        mixamoBone.updateMatrixWorld(true);
+      const bindWorld = this.bindPoseWorld.get(bp);
+      if (bindWorld) {
+        this.desiredWorld.copy(this.worldQuat).multiply(bindWorld);
+      } else {
+        this.desiredWorld.copy(this.worldQuat);
       }
 
-      if (this.mixamoScene) {
-        this.mixamoScene.updateMatrixWorld(true);
+      if (!mixamoBone.parent || !(mixamoBone.parent instanceof THREE.Bone)) {
+        mixamoBone.quaternion.copy(this.desiredWorld);
+        continue;
       }
+
+      mixamoBone.parent.getWorldQuaternion(this.parentWorldInv);
+      this.parentWorldInv.invert();
+      this.parentWorldInv.multiply(this.desiredWorld);
+      mixamoBone.quaternion.copy(this.parentWorldInv);
+    }
+
+    if (this.mixamoScene) {
+      this.mixamoScene.updateMatrixWorld(true);
+    }
   }
 
   private hideStickFigure() {
