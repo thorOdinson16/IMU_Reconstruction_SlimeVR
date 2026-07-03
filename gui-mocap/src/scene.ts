@@ -131,7 +131,7 @@ export class MocapScene {
     this.renderer.toneMappingExposure = 1.0;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1a2e);
+    this.scene.background = new THREE.Color(0xbbbbbb);
 
     this.camera = new THREE.PerspectiveCamera(50, canvas.width / canvas.height, 0.1, 50);
     this.camera.position.set(2, 0.3, 3);
@@ -161,8 +161,8 @@ export class MocapScene {
   }
 
   private setupGround() {
-    const grid = new THREE.GridHelper(8, 16, 0x444488, 0x333366);
-    this.scene.add(grid);
+      const grid = new THREE.GridHelper(8, 16, 0x000000, 0x888888);
+      this.scene.add(grid);
   }
 
   private setupOrbitControls() {
