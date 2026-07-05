@@ -395,9 +395,14 @@ export class MocapScene {
       }
 
       const p = bone.headPositionG;
+      const q = bone.rotationG;
+      if (!p || !q) {
+        node.mesh.visible = false;
+        node.joint.visible = false;
+        continue;
+      }
       node.joint.position.set(p.x, p.y, p.z);
 
-      const q = bone.rotationG;
       const len = bone.boneLength;
       if (len > 0.001) {
         node.mesh.visible = true;

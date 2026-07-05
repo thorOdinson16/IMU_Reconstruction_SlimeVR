@@ -105,17 +105,22 @@ class Constraint(
 			rotation: Quaternion,
 			twistAxis: Vector3,
 		): Pair<Quaternion, Quaternion> {
-			val projection = rotation.project(twistAxis).unit()
-			val twist = Quaternion(sqrt(1.0f - projection.xyz.lenSq()) * if (rotation.w >= 0f) 1f else -1f, projection.xyz).unit()
+			// Correctly project the vector part of the quaternion onto the twist axis
+			val projectedVector = twistAxis * rotation.xyz.dot(twistAxis)
+			var twist = Quaternion(rotation.w, projectedVector)
+			
+			// Handle singularity when the rotation is exactly 180 degrees away from the twist axis
+			if (twist.w * twist.w + twist.xyz.lenSq() < 1e-6f) {
+				twist = Quaternion.IDENTITY
+			} else {
+				twist = twist.unit()
+			}
+			
 			val swing = (rotation * twist.inv()).unit()
 			return Pair(swing, twist)
 		}
 
 		private fun constrain(rotation: Quaternion, angle: Float): Quaternion {
-			// Use angle to get the maximum magnitude the vector part of rotation can be
-			// before it has violated a constraint.
-			// Multiplying by 0.5 uniquely maps angles 0-180 degrees to 0-1 which works
-			// nicely with unit quaternions.
 			val magnitude = sin(angle * 0.5f)
 			val magnitudeSqr = magnitude * magnitude
 			val sign = if (rotation.w >= 0f) 1f else -1f
@@ -124,33 +129,39 @@ class Constraint(
 
 			if (vector.lenSq() > magnitudeSqr) {
 				vector = vector.unit() * magnitude
-				rot = Quaternion(sqrt(1.0f - magnitudeSqr) * sign, vector)
+				// Added max(0.0f, ...) to guarantee sqrt never receives a negative number from float inaccuracies
+				rot = Quaternion(sqrt(max(0.0f, 1.0f - magnitudeSqr)) * sign, vector)
 			}
 
 			return rot.unit()
 		}
 
 		private fun constrain(rotation: Quaternion, minAngle: Float, maxAngle: Float, axis: Vector3): Quaternion {
-			val magnitudeMin = sin(minAngle * 0.5f)
-			val magnitudeMax = sin(maxAngle * 0.5f)
-			val magnitudeSqrMin = magnitudeMin * magnitudeMin * if (minAngle >= 0f) 1f else -1f
-			val magnitudeSqrMax = magnitudeMax * magnitudeMax * if (maxAngle >= 0f) 1f else -1f
-			var vector = rotation.xyz
-			var rot = rotation
-
-			val rotMagnitude = vector.lenSq() * if (vector.dot(axis) * sign(rot.w) < 0) -1f else 1f
-			if (rotMagnitude < magnitudeSqrMin || rotMagnitude > magnitudeSqrMax) {
-				val distToMin = min(abs(rotMagnitude - magnitudeSqrMin), abs(rotMagnitude + magnitudeSqrMin))
-				val distToMax = min(abs(rotMagnitude - magnitudeSqrMax), abs(rotMagnitude + magnitudeSqrMax))
-
-				val magnitude = if (distToMin < distToMax) magnitudeMin else magnitudeMax
-				val magnitudeSqr = abs(if (distToMin < distToMax) magnitudeSqrMin else magnitudeSqrMax)
-				vector = vector.unit() * -magnitude
-
-				rot = Quaternion(sqrt(1.0f - magnitudeSqr), vector)
+			var minA = minAngle
+			var maxA = maxAngle
+			
+			// Ensure min is strictly less than max to fix the negative range inversion (0 to -180)
+			if (minA > maxA) {
+				val temp = minA
+				minA = maxA
+				maxA = temp
 			}
 
-			return rot.unit()
+			// Safely extract the exact angle to bypass the squared magnitude logic flaws
+			val wSign = if (rotation.w >= 0f) 1f else -1f
+			var angle = 2.0f * atan2(rotation.xyz.dot(axis) * wSign, abs(rotation.w))
+
+			// Snap to min or max if the angle falls outside the valid bounds
+			if (angle < minA || angle > maxA) {
+				val distToMin = abs(angle - minA)
+				val distToMax = abs(angle - maxA)
+				angle = if (distToMin < distToMax) minA else maxA
+
+				val halfAngle = angle * 0.5f
+				return Quaternion(cos(halfAngle), axis * sin(halfAngle)).unit()
+			}
+
+			return rotation
 		}
 
 		// Constraint function for TwistSwingConstraint

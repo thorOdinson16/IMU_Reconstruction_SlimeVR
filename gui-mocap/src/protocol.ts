@@ -90,7 +90,7 @@ export class ProtocolClient {
     const builder = new flatbuffers.Builder(1024);
     const offset = msg.pack(builder);
     builder.finish(offset);
-    this.ws.send(builder.asUint8Array());
+    this.ws.send(new Uint8Array(builder.asUint8Array()));
   }
 
   private startDataFeed() {
