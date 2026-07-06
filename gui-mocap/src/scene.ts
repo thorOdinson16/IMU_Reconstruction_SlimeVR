@@ -1,9 +1,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { BoneT, BodyPart } from 'solarxr-protocol';
+import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
 
 const BONE_RADIUS = 0.02;
 const JOINT_RADIUS = 0.03;
+const FOOT_CONTACT_HEIGHT = 0.08;
+const FOOT_CONTACT_SPEED = 0.35;
+const MAX_ROOT_DELTA_PER_FRAME = 0.08;
+const ROOT_SMOOTHING = 0.18;
 
 const BONE_PARENT: Partial<Record<BodyPart, BodyPart>> = {
   [BodyPart.HEAD]: BodyPart.NECK,
@@ -116,9 +120,19 @@ export class MocapScene {
   // model in its natural default pose.
   private bindPoseWorld = new Map<BodyPart, THREE.Quaternion>();
   private bindPoseLocal = new Map<BodyPart, THREE.Quaternion>();
+  private bindHipLocalPosition = new THREE.Vector3();
   private parentWorldInv = new THREE.Quaternion();
   private worldQuat = new THREE.Quaternion();
   private desiredWorld = new THREE.Quaternion();
+
+  private poseCalibrated = false;
+  private calibratedHip = new THREE.Vector3();
+  private rootTarget = new THREE.Vector3();
+  private rootSmoothed = new THREE.Vector3();
+  private previousLeftFoot: THREE.Vector3 | null = null;
+  private previousRightFoot: THREE.Vector3 | null = null;
+  private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private lastPoseTime = performance.now();
 
   constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void) {
     this.onModelStatus = onModelStatus ?? null;
@@ -145,23 +159,31 @@ export class MocapScene {
   }
 
   private setupLights() {
+    // 1. Ambient Light: Base level of light everywhere
     const ambient = new THREE.AmbientLight(0x404060, 0.6);
     this.scene.add(ambient);
 
-    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
-    dir.position.set(5, 10, 7);
-    dir.castShadow = true;
-    dir.shadow.mapSize.width = 1024;
-    dir.shadow.mapSize.height = 1024;
-    this.scene.add(dir);
+    // 2. Key Light: Your main, bright front light (Creates the primary shadows)
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    keyLight.position.set(5, 10, 7);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.width = 1024;
+    keyLight.shadow.mapSize.height = 1024;
+    this.scene.add(keyLight);
 
-    const fill = new THREE.DirectionalLight(0x4488ff, 0.3);
-    fill.position.set(-3, 1, -4);
-    this.scene.add(fill);
+    // 3. Fill Light: Softens the shadows on the front/side
+    const fillLight = new THREE.DirectionalLight(0x4488ff, 0.4);
+    fillLight.position.set(-5, 3, 5); 
+    this.scene.add(fillLight);
+
+    // 4. NEW - Back Light: Illuminates the back of the model
+    const backLight = new THREE.DirectionalLight(0xffffff, 0.9); // Adjust intensity here (0.5 to 1.0 is usually good)
+    backLight.position.set(0, 6, -10); // Placed behind (negative Z) and slightly elevated
+    this.scene.add(backLight);
   }
 
   private setupGround() {
-      const grid = new THREE.GridHelper(8, 16, 0x000000, 0x888888);
+      const grid = new THREE.GridHelper(10, 20, 0x000000, 0x888888);
       this.scene.add(grid);
   }
 
@@ -174,10 +196,11 @@ export class MocapScene {
     let radius = 3.5;
 
     const updateCam = () => {
+      const targetHeight = 0.9; 
       this.camera.position.x = radius * Math.sin(phi) * Math.sin(theta);
-      this.camera.position.y = radius * Math.cos(phi) - 0.3;
+      this.camera.position.y = radius * Math.cos(phi) + targetHeight; 
       this.camera.position.z = radius * Math.sin(phi) * Math.cos(theta);
-      this.camera.lookAt(0, -0.3, 0);
+      this.camera.lookAt(0, targetHeight, 0); 
     };
 
     this.renderer.domElement.addEventListener('pointerdown', (e) => {
@@ -199,7 +222,7 @@ export class MocapScene {
     this.renderer.domElement.addEventListener(
       'wheel',
       (e) => {
-        radius = Math.max(1.2, Math.min(8, radius + e.deltaY * 0.005));
+        radius = Math.max(1.2, Math.min(10, radius + e.deltaY * 0.005));
         updateCam();
       },
       { passive: true },
@@ -253,6 +276,11 @@ export class MocapScene {
       this.scene.add(model);
       this.mixamoScene = model;
 
+      const rootBone = this.mixamoBones.get(BodyPart.HIP);
+      if (rootBone) {
+        this.bindHipLocalPosition.copy(rootBone.position);
+      }
+
       // Compute bind-pose world rotations
       this.mixamoScene.updateMatrixWorld(true);
       for (const [bp, bone] of this.mixamoBones) {
@@ -267,26 +295,24 @@ export class MocapScene {
     }
   }
 
-  update(bones: BoneT[]) {
+  update(bones: BoneT[], syntheticTrackers: TrackerDataT[] = [], walkEnabled = false) {
     if (this.mixamoLoaded) {
-      this.applyMixamoPose(bones);
+      this.applyMixamoPose(bones, syntheticTrackers, walkEnabled);
       this.hideStickFigure();
     } else {
       this.updateStickFigure(bones);
     }
   }
 
-  private applyMixamoPose(bones: BoneT[]) {
+  private applyMixamoPose(bones: BoneT[], syntheticTrackers: TrackerDataT[], walkEnabled: boolean) {
       const rootBone = this.mixamoBones.get(BodyPart.HIP);
       if (!rootBone) return;
 
       const dataByPart = new Map<BodyPart, BoneT>();
       for (const b of bones) dataByPart.set(b.bodyPart, b);
+      const trackerByPart = this.getSyntheticTrackerPositions(syntheticTrackers);
 
-      const rootData = dataByPart.get(BodyPart.HIP);
-      if (rootData && rootData.headPositionG) {
-        rootBone.position.set(rootData.headPositionG.x, rootData.headPositionG.y, rootData.headPositionG.z);
-      }
+      this.updateRootAndPelvis(dataByPart, trackerByPart, walkEnabled, rootBone);
 
       const order: BodyPart[] = [
         BodyPart.HIP,
@@ -352,6 +378,117 @@ export class MocapScene {
       if (this.mixamoScene) {
         this.mixamoScene.updateMatrixWorld(true);
       }
+  }
+
+  private updateRootAndPelvis(
+    dataByPart: Map<BodyPart, BoneT>,
+    trackerByPart: Map<BodyPart, THREE.Vector3>,
+    walkEnabled: boolean,
+    rootBone: THREE.Bone,
+  ) {
+    const hip = trackerByPart.get(BodyPart.HIP) ?? this.getBonePosition(dataByPart, BodyPart.HIP);
+    const leftFoot = trackerByPart.get(BodyPart.LEFT_FOOT) ?? this.getBonePosition(dataByPart, BodyPart.LEFT_FOOT);
+    const rightFoot = trackerByPart.get(BodyPart.RIGHT_FOOT) ?? this.getBonePosition(dataByPart, BodyPart.RIGHT_FOOT);
+    if (!hip || !leftFoot || !rightFoot || !this.mixamoScene) return;
+
+    if (!this.poseCalibrated) {
+      this.calibratedHip.copy(hip);
+      this.previousLeftFoot = leftFoot.clone();
+      this.previousRightFoot = rightFoot.clone();
+      this.rootTarget.set(0, 0, 0);
+      this.rootSmoothed.set(0, 0, 0);
+      this.poseCalibrated = true;
+    }
+
+    const hipDeltaY = hip.y - this.calibratedHip.y;
+    rootBone.position.copy(this.bindHipLocalPosition);
+    rootBone.position.y += hipDeltaY;
+
+    this.updateLocomotionRoot(hip, leftFoot, rightFoot, walkEnabled);
+    this.rootSmoothed.lerp(this.rootTarget, ROOT_SMOOTHING);
+    this.mixamoScene.position.x = this.rootSmoothed.x;
+    this.mixamoScene.position.z = this.rootSmoothed.z;
+  }
+
+  private updateLocomotionRoot(
+    hip: THREE.Vector3,
+    leftFoot: THREE.Vector3,
+    rightFoot: THREE.Vector3,
+    walkEnabled: boolean,
+  ) {
+    const now = performance.now();
+    const dt = Math.max((now - this.lastPoseTime) / 1000, 1 / 120);
+    this.lastPoseTime = now;
+
+    if (!this.previousLeftFoot || !this.previousRightFoot) {
+      this.previousLeftFoot = leftFoot.clone();
+      this.previousRightFoot = rightFoot.clone();
+      return;
+    }
+
+    if (!walkEnabled) {
+      this.previousLeftFoot.copy(leftFoot);
+      this.previousRightFoot.copy(rightFoot);
+      this.plantedFoot = null;
+      return;
+    }
+
+    this.rootTarget.x = hip.x - this.calibratedHip.x;
+    this.rootTarget.z = hip.z - this.calibratedHip.z;
+
+    const floorY = Math.min(leftFoot.y, rightFoot.y);
+    const leftSpeed = this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt;
+    const rightSpeed = this.horizontalDistance(rightFoot, this.previousRightFoot) / dt;
+    const leftContact = leftFoot.y - floorY <= FOOT_CONTACT_HEIGHT && leftSpeed <= FOOT_CONTACT_SPEED;
+    const rightContact = rightFoot.y - floorY <= FOOT_CONTACT_HEIGHT && rightSpeed <= FOOT_CONTACT_SPEED;
+
+    let nextPlanted: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+    if (leftContact && rightContact) {
+      nextPlanted = leftSpeed <= rightSpeed ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+    } else if (leftContact) {
+      nextPlanted = BodyPart.LEFT_FOOT;
+    } else if (rightContact) {
+      nextPlanted = BodyPart.RIGHT_FOOT;
+    }
+
+    if (nextPlanted != null && this.plantedFoot === nextPlanted) {
+      const current = nextPlanted === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
+      const previous = nextPlanted === BodyPart.LEFT_FOOT ? this.previousLeftFoot : this.previousRightFoot;
+      const dx = THREE.MathUtils.clamp(previous.x - current.x, -MAX_ROOT_DELTA_PER_FRAME, MAX_ROOT_DELTA_PER_FRAME);
+      const dz = THREE.MathUtils.clamp(previous.z - current.z, -MAX_ROOT_DELTA_PER_FRAME, MAX_ROOT_DELTA_PER_FRAME);
+      if (Math.abs(this.rootTarget.x) < 0.001 && Math.abs(this.rootTarget.z) < 0.001) {
+        this.rootTarget.x += dx;
+        this.rootTarget.z += dz;
+      }
+    }
+
+    this.plantedFoot = nextPlanted;
+    this.previousLeftFoot.copy(leftFoot);
+    this.previousRightFoot.copy(rightFoot);
+  }
+
+  private getBonePosition(dataByPart: Map<BodyPart, BoneT>, bodyPart: BodyPart): THREE.Vector3 | null {
+    const p = dataByPart.get(bodyPart)?.headPositionG;
+    return p ? new THREE.Vector3(p.x, p.y, p.z) : null;
+  }
+
+  private getSyntheticTrackerPositions(trackers: TrackerDataT[]) {
+    const positions = new Map<BodyPart, THREE.Vector3>();
+
+    for (const tracker of trackers) {
+      const bodyPart = tracker.info?.bodyPart;
+      const position = tracker.position;
+      if (bodyPart == null || bodyPart === BodyPart.NONE || !position) continue;
+      positions.set(bodyPart, new THREE.Vector3(position.x, position.y, position.z));
+    }
+
+    return positions;
+  }
+
+  private horizontalDistance(a: THREE.Vector3, b: THREE.Vector3) {
+    const dx = a.x - b.x;
+    const dz = a.z - b.z;
+    return Math.sqrt(dx * dx + dz * dz);
   }
 
   private hideStickFigure() {

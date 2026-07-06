@@ -559,6 +559,7 @@ class HumanSkeleton(
 
 		legTweaks.tweakLegs()
 		localizer.update()
+		if (localizer.getEnabled()) headBone.update()
 	}
 
 	/**

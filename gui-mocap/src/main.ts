@@ -13,9 +13,11 @@ const scene = new MocapScene(canvas, (status) => {
 });
 scene.start();
 
+let walkEnabled = false;
+
 const client = new ProtocolClient(
   WS_URL,
-  (bones, _index) => scene.update(bones),
+  (bones, syntheticTrackers, _index) => scene.update(bones, syntheticTrackers, walkEnabled),
   (connected, msg) => {
     connStatus.textContent = msg;
     connStatus.className = connected ? 'connected' : 'disconnected';
@@ -26,6 +28,7 @@ const client = new ProtocolClient(
 );
 
 client.connect();
+const walkBtn = document.querySelector('[data-cmd="toggle-walk"]') as HTMLElement;
 
 document.getElementById('controls')!.addEventListener('click', (e) => {
   const btn = (e.target as HTMLElement).closest('[data-cmd]') as HTMLElement;
@@ -37,6 +40,11 @@ document.getElementById('controls')!.addEventListener('click', (e) => {
     case 'autobone-record': client.sendAutoBoneRecord(); break;
     case 'autobone-process': client.sendAutoBoneProcess(); break;
     case 'autobone-apply': client.sendAutoBoneApply(); break;
+    case 'toggle-walk':
+      walkEnabled = !walkEnabled;
+      client.sendToggleWalk(walkEnabled);
+      walkBtn.textContent = walkEnabled ? 'Walk: ON' : 'Walk: OFF';
+      break;
   }
 });
 

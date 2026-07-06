@@ -17,9 +17,13 @@ import {
   TrackerDataMaskT,
   DeviceDataMaskT,
   DataFeedMessage,
+  TrackerDataT,
+  ChangeSettingsRequestT,
+  ModelSettingsT,
+  ModelTogglesT,
 } from 'solarxr-protocol';
 
-type BoneCallback = (bones: BoneT[], index: number) => void;
+type BoneCallback = (bones: BoneT[], syntheticTrackers: TrackerDataT[], index: number) => void;
 
 export class ProtocolClient {
   private ws: WebSocket | null = null;
@@ -77,7 +81,7 @@ export class ProtocolClient {
         if (hdr.messageType === DataFeedMessage.DataFeedUpdate) {
           const update = hdr.message as DataFeedUpdateT;
           if (update.bones) {
-            this.onBones(update.bones, update.index);
+            this.onBones(update.bones, update.syntheticTrackers ?? [], update.index);
             this.onTrackerCount(update.bones.length);
           }
         }
@@ -162,6 +166,25 @@ export class ProtocolClient {
     const hdr = new RpcMessageHeaderT();
     hdr.messageType = RpcMessage.AutoBoneApplyRequest;
     hdr.message = new AutoBoneApplyRequestT();
+    bundle.rpcMsgs = [hdr];
+    this.send(bundle);
+  }
+
+  sendToggleWalk(enabled: boolean) {
+    const toggles = new ModelTogglesT();
+    toggles.selfLocalization = enabled;
+
+    const modelSettings = new ModelSettingsT();
+    modelSettings.toggles = toggles;
+
+    const bundle = new MessageBundleT();
+    const hdr = new RpcMessageHeaderT();
+    hdr.messageType = RpcMessage.ChangeSettingsRequest;
+    hdr.message = new ChangeSettingsRequestT(
+      null, null, null, null, null, null,
+      modelSettings,
+      null, null, null, null, null, null, null, null,
+    );
     bundle.rpcMsgs = [hdr];
     this.send(bundle);
   }

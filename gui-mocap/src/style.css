@@ -38,6 +38,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #111; colo
 .btn-rec { border-color: #f80; color: #f80; }
 .btn-proc { border-color: #08f; color: #08f; }
 .btn-apply { border-color: #0f0; color: #0f0; }
+.btn-walk { border-color: #af0; color: #af0; }
 
 #info {
   position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);

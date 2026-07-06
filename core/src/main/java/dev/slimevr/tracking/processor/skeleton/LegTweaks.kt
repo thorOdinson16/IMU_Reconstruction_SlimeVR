@@ -290,7 +290,7 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 		active = isStanding()
 
 		// if the buffer is invalid add all the extra info
-		if (bufferInvalid && !localizerMode) {
+		if (bufferInvalid) {
 			bufferHead
 				.setPositions(
 					leftFootPosition,
@@ -301,7 +301,7 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 				)
 
 			// if active correct clipping before populating corrected positions
-			if (active) {
+			if (active && !localizerMode) {
 				correctClipping()
 			}
 
