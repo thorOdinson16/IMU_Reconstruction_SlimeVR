@@ -533,6 +533,11 @@ export class MocapScene {
     const fLeftFoot = this.leftFootFilter.filter(leftFoot, dt);
     const fRightFoot = this.rightFootFilter.filter(rightFoot, dt);
 
+    // bypass filtering on vertical axis to avoid squat lag
+    fHip.y = hip.y;
+    fLeftFoot.y = leftFoot.y;
+    fRightFoot.y = rightFoot.y;
+
     this.solveFootLockRoot(fHip, fLeftFoot, fRightFoot, dt);
 
     // Apply the solved hip displacement directly -- no extra smoothing stage -- so the
@@ -602,7 +607,6 @@ export class MocapScene {
     const leftSpeed = this.previousLeftFoot ? this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt : 0;
     const rightSpeed = this.previousRightFoot ? this.horizontalDistance(rightFoot, this.previousRightFoot) / dt : 0;
     const hipSpeed = this.previousHip ? this.horizontalDistance(hip, this.previousHip) / dt : 0;
-
     if (!this.stationary && hipSpeed < STATIONARY_ENTER_SPEED) {
       this.stationary = true;
       this.stationaryLockX = this.hipWorldTarget.x;
@@ -610,11 +614,8 @@ export class MocapScene {
     } else if (this.stationary && hipSpeed > STATIONARY_EXIT_SPEED) {
       this.stationary = false;
     }
-
-    const leftContact = leftFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT && leftSpeed <= FOOT_CONTACT_SPEED;
-    const rightContact = rightFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT && rightSpeed <= FOOT_CONTACT_SPEED;
-
-    // Best available ground contact: prefer the lower foot, break ties by the slower one.
+    const leftContact = leftFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT;
+    const rightContact = rightFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT;
     let best: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
     if (leftContact && rightContact) {
       if (Math.abs(leftFoot.y - rightFoot.y) > 0.02) {
@@ -627,20 +628,15 @@ export class MocapScene {
     } else if (rightContact) {
       best = BodyPart.RIGHT_FOOT;
     }
-
     const plantedContact = this.plantedFoot === BodyPart.LEFT_FOOT
       ? leftContact
       : this.plantedFoot === BodyPart.RIGHT_FOOT
         ? rightContact
         : false;
-
     if (this.plantedFoot != null && this.plantedGrounded && plantedContact) {
-      // Stance foot is still grounded -- keep it locked, no flip-flop.
       this.contactCandidate = null;
       this.contactCandidateFrames = 0;
     } else if (best != null) {
-      // Current stance foot lost contact (or none is planted yet): debounce the switch
-      // so a single noisy frame can't force a reanchor, only a sustained change can.
       const firstPlant = this.plantedFoot == null;
       if (this.contactCandidate === best) {
         this.contactCandidateFrames++;
@@ -648,10 +644,7 @@ export class MocapScene {
         this.contactCandidate = best;
         this.contactCandidateFrames = 1;
       }
-
       if (firstPlant || this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
-        // (Re)acquire a stance foot. Re-anchor relative to the currently displayed hip
-        // position so the transition is continuous (no pop).
         const foot = best === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
         this.anchor.set(
           this.hipWorldTarget.x + (foot.x - hip.x),
@@ -664,27 +657,20 @@ export class MocapScene {
         this.contactCandidateFrames = 0;
       }
     } else {
-      // Both feet airborne (e.g. mid-run/jump): freeze the root until one lands.
       this.contactCandidate = null;
       this.contactCandidateFrames = 0;
       this.plantedGrounded = false;
     }
-
     if (this.plantedFoot != null && this.plantedGrounded) {
       const foot = this.plantedFoot === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
-      this.hipWorldTarget.set(
-        this.anchor.x - (foot.x - hip.x),
-        this.anchor.y - (foot.y - hip.y),
-        this.anchor.z - (foot.z - hip.z),
-      );
+      this.hipWorldTarget.x = this.anchor.x - (foot.x - hip.x);
+      this.hipWorldTarget.z = this.anchor.z - (foot.z - hip.z);
     }
-    // else: hold the previous hipWorldTarget (frozen root while airborne).
-
+    this.hipWorldTarget.y = hip.y;
     if (this.stationary) {
       this.hipWorldTarget.x = this.stationaryLockX;
       this.hipWorldTarget.z = this.stationaryLockZ;
     }
-
     this.previousLeftFoot!.copy(leftFoot);
     this.previousRightFoot!.copy(rightFoot);
     this.previousHip!.copy(hip);
