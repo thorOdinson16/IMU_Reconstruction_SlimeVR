@@ -170,9 +170,14 @@ export class ProtocolClient {
     this.send(bundle);
   }
 
-  sendToggleWalk(enabled: boolean) {
+  sendToggleWalk(_enabled: boolean) {
+    // Walk Mode is handled entirely client-side (see MocapScene's foot-lock root
+    // solver). We deliberately keep the server's self-localization OFF so the
+    // server stays floor-clipped and produces a clean, non-drifting relative pose
+    // that the client can lock feet against. Enabling it disables the server
+    // floor-clip and injects an odometry drift that fights the client solver.
     const toggles = new ModelTogglesT();
-    toggles.selfLocalization = enabled;
+    toggles.selfLocalization = false;
 
     const modelSettings = new ModelSettingsT();
     modelSettings.toggles = toggles;

@@ -4,10 +4,10 @@ import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
 
 const BONE_RADIUS = 0.02;
 const JOINT_RADIUS = 0.03;
-const FOOT_CONTACT_HEIGHT = 0.08;
-const FOOT_CONTACT_SPEED = 0.35;
-const MAX_ROOT_DELTA_PER_FRAME = 0.08;
-const ROOT_SMOOTHING = 0.18;
+const FOOT_CONTACT_HEIGHT = 0.08;   // m above the floor plane still counts as ground contact
+const FOOT_CONTACT_SPEED = 0.5;     // m/s; a foot slower than this near the floor is "planted"
+const ROOT_SMOOTHING = 0.5;         // fraction of remaining root error applied per frame
+const MAX_ROOT_STEP = 0.15;         // m; per-frame clamp on root motion to reject detection spikes
 
 const BONE_PARENT: Partial<Record<BodyPart, BodyPart>> = {
   [BodyPart.HEAD]: BodyPart.NECK,
@@ -127,11 +127,19 @@ export class MocapScene {
 
   private poseCalibrated = false;
   private calibratedHip = new THREE.Vector3();
-  private rootTarget = new THREE.Vector3();
-  private rootSmoothed = new THREE.Vector3();
+  private floorY = 0;
+  // Foot-lock locomotion state (walk mode). Everything is in server/world space; the
+  // model is translated by (hipWorldTarget - calibratedHip) so the calibration pose
+  // maps to the origin. The relative geometry (foot - hip) used below is invariant to
+  // any global drift the server might apply, which is why it is robust.
+  private hipWorldTarget = new THREE.Vector3(); // desired hip world position this frame
+  private anchor = new THREE.Vector3();          // locked world position of the planted foot
+  private rootSmoothed = new THREE.Vector3();    // smoothed translation actually applied
+  private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private plantedGrounded = false;
+  private walkActive = false;
   private previousLeftFoot: THREE.Vector3 | null = null;
   private previousRightFoot: THREE.Vector3 | null = null;
-  private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
   private lastPoseTime = performance.now();
 
   constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void) {
@@ -393,78 +401,140 @@ export class MocapScene {
 
     if (!this.poseCalibrated) {
       this.calibratedHip.copy(hip);
+      this.floorY = Math.min(leftFoot.y, rightFoot.y);
+      this.hipWorldTarget.copy(hip);
+      this.rootSmoothed.set(0, 0, 0);
       this.previousLeftFoot = leftFoot.clone();
       this.previousRightFoot = rightFoot.clone();
-      this.rootTarget.set(0, 0, 0);
-      this.rootSmoothed.set(0, 0, 0);
+      this.plantedFoot = null;
+      this.plantedGrounded = false;
       this.poseCalibrated = true;
     }
 
-    const hipDeltaY = hip.y - this.calibratedHip.y;
+    // Hip bone always sits at its bind-pose local position; vertical hip motion is
+    // carried by the model translation (walk mode) or a local Y offset (walk off).
     rootBone.position.copy(this.bindHipLocalPosition);
-    rootBone.position.y += hipDeltaY;
 
-    this.updateLocomotionRoot(hip, leftFoot, rightFoot, walkEnabled);
-    this.rootSmoothed.lerp(this.rootTarget, ROOT_SMOOTHING);
-    this.mixamoScene.position.x = this.rootSmoothed.x;
-    this.mixamoScene.position.z = this.rootSmoothed.z;
+    if (!walkEnabled) {
+      // Known-good path: vertical follows the server hip, no horizontal translation.
+      rootBone.position.y += hip.y - this.calibratedHip.y;
+      // Keep locomotion state parked at the current pose so re-enabling starts clean.
+      this.hipWorldTarget.copy(hip);
+      this.rootSmoothed.set(0, 0, 0);
+      this.plantedFoot = null;
+      this.plantedGrounded = false;
+      this.walkActive = false;
+      this.previousLeftFoot!.copy(leftFoot);
+      this.previousRightFoot!.copy(rightFoot);
+      this.lastPoseTime = performance.now();
+      this.mixamoScene.position.set(0, 0, 0);
+      return;
+    }
+
+    // Walk off -> on: start from the current pose with zero translation (no jump).
+    if (!this.walkActive) {
+      this.hipWorldTarget.copy(hip);
+      this.rootSmoothed.set(0, 0, 0);
+      this.plantedFoot = null;
+      this.plantedGrounded = false;
+      this.previousLeftFoot!.copy(leftFoot);
+      this.previousRightFoot!.copy(rightFoot);
+      this.lastPoseTime = performance.now();
+      this.walkActive = true;
+    }
+
+    this.solveFootLockRoot(hip, leftFoot, rightFoot);
+
+    // Translate the whole model by the solved hip displacement, smoothed and clamped.
+    const px = this.hipWorldTarget.x - this.calibratedHip.x;
+    const py = this.hipWorldTarget.y - this.calibratedHip.y;
+    const pz = this.hipWorldTarget.z - this.calibratedHip.z;
+    let sx = (px - this.rootSmoothed.x) * ROOT_SMOOTHING;
+    let sy = (py - this.rootSmoothed.y) * ROOT_SMOOTHING;
+    let sz = (pz - this.rootSmoothed.z) * ROOT_SMOOTHING;
+    const stepLen = Math.hypot(sx, sy, sz);
+    if (stepLen > MAX_ROOT_STEP) {
+      const scale = MAX_ROOT_STEP / stepLen;
+      sx *= scale; sy *= scale; sz *= scale;
+    }
+    this.rootSmoothed.x += sx;
+    this.rootSmoothed.y += sy;
+    this.rootSmoothed.z += sz;
+    this.mixamoScene.position.set(this.rootSmoothed.x, this.rootSmoothed.y, this.rootSmoothed.z);
   }
 
-  private updateLocomotionRoot(
-    hip: THREE.Vector3,
-    leftFoot: THREE.Vector3,
-    rightFoot: THREE.Vector3,
-    walkEnabled: boolean,
-  ) {
+  /**
+   * Foot-lock root solver. Anchors the planted foot to a fixed world point (with a
+   * shared ground plane at `floorY`) and derives the hip position that keeps that foot
+   * planted given the current leg pose: `hipWorld = anchor - (foot - hip)`.
+   *
+   * This produces both effects from one rule:
+   *  - Squat/sit: as the knee bends the foot rises relative to the hip, so the hip is
+   *    pushed down to keep the foot on the floor (instead of the foot floating up).
+   *  - Walking: as the body passes over the stance foot, the hip advances by the full
+   *    real stride in the leg's own direction.
+   */
+  private solveFootLockRoot(hip: THREE.Vector3, leftFoot: THREE.Vector3, rightFoot: THREE.Vector3) {
     const now = performance.now();
     const dt = Math.max((now - this.lastPoseTime) / 1000, 1 / 120);
     this.lastPoseTime = now;
 
-    if (!this.previousLeftFoot || !this.previousRightFoot) {
-      this.previousLeftFoot = leftFoot.clone();
-      this.previousRightFoot = rightFoot.clone();
-      return;
-    }
+    const leftSpeed = this.previousLeftFoot ? this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt : 0;
+    const rightSpeed = this.previousRightFoot ? this.horizontalDistance(rightFoot, this.previousRightFoot) / dt : 0;
 
-    if (!walkEnabled) {
-      this.previousLeftFoot.copy(leftFoot);
-      this.previousRightFoot.copy(rightFoot);
-      this.plantedFoot = null;
-      return;
-    }
+    const leftContact = leftFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT && leftSpeed <= FOOT_CONTACT_SPEED;
+    const rightContact = rightFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT && rightSpeed <= FOOT_CONTACT_SPEED;
 
-    this.rootTarget.x = hip.x - this.calibratedHip.x;
-    this.rootTarget.z = hip.z - this.calibratedHip.z;
-
-    const floorY = Math.min(leftFoot.y, rightFoot.y);
-    const leftSpeed = this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt;
-    const rightSpeed = this.horizontalDistance(rightFoot, this.previousRightFoot) / dt;
-    const leftContact = leftFoot.y - floorY <= FOOT_CONTACT_HEIGHT && leftSpeed <= FOOT_CONTACT_SPEED;
-    const rightContact = rightFoot.y - floorY <= FOOT_CONTACT_HEIGHT && rightSpeed <= FOOT_CONTACT_SPEED;
-
-    let nextPlanted: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+    // Best available ground contact: prefer the lower foot, break ties by the slower one.
+    let best: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
     if (leftContact && rightContact) {
-      nextPlanted = leftSpeed <= rightSpeed ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
-    } else if (leftContact) {
-      nextPlanted = BodyPart.LEFT_FOOT;
-    } else if (rightContact) {
-      nextPlanted = BodyPart.RIGHT_FOOT;
-    }
-
-    if (nextPlanted != null && this.plantedFoot === nextPlanted) {
-      const current = nextPlanted === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
-      const previous = nextPlanted === BodyPart.LEFT_FOOT ? this.previousLeftFoot : this.previousRightFoot;
-      const dx = THREE.MathUtils.clamp(previous.x - current.x, -MAX_ROOT_DELTA_PER_FRAME, MAX_ROOT_DELTA_PER_FRAME);
-      const dz = THREE.MathUtils.clamp(previous.z - current.z, -MAX_ROOT_DELTA_PER_FRAME, MAX_ROOT_DELTA_PER_FRAME);
-      if (Math.abs(this.rootTarget.x) < 0.001 && Math.abs(this.rootTarget.z) < 0.001) {
-        this.rootTarget.x += dx;
-        this.rootTarget.z += dz;
+      if (Math.abs(leftFoot.y - rightFoot.y) > 0.02) {
+        best = leftFoot.y < rightFoot.y ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+      } else {
+        best = leftSpeed <= rightSpeed ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
       }
+    } else if (leftContact) {
+      best = BodyPart.LEFT_FOOT;
+    } else if (rightContact) {
+      best = BodyPart.RIGHT_FOOT;
     }
 
-    this.plantedFoot = nextPlanted;
-    this.previousLeftFoot.copy(leftFoot);
-    this.previousRightFoot.copy(rightFoot);
+    const plantedContact = this.plantedFoot === BodyPart.LEFT_FOOT
+      ? leftContact
+      : this.plantedFoot === BodyPart.RIGHT_FOOT
+        ? rightContact
+        : false;
+
+    if (this.plantedFoot != null && this.plantedGrounded && plantedContact) {
+      // Keep the current stance foot while it stays grounded (no flip-flop, no hysteresis
+      // needed): we only ever switch feet once the current one leaves the ground.
+    } else if (best != null) {
+      // (Re)acquire a stance foot. Re-anchor so the hip is continuous across the switch.
+      const foot = best === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
+      this.anchor.set(
+        this.hipWorldTarget.x + (foot.x - hip.x),
+        this.floorY,
+        this.hipWorldTarget.z + (foot.z - hip.z),
+      );
+      this.plantedFoot = best;
+      this.plantedGrounded = true;
+    } else {
+      // Both feet airborne (e.g. mid-run/jump): freeze the root until one lands.
+      this.plantedGrounded = false;
+    }
+
+    if (this.plantedFoot != null && this.plantedGrounded) {
+      const foot = this.plantedFoot === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
+      this.hipWorldTarget.set(
+        this.anchor.x - (foot.x - hip.x),
+        this.anchor.y - (foot.y - hip.y),
+        this.anchor.z - (foot.z - hip.z),
+      );
+    }
+    // else: hold the previous hipWorldTarget (frozen root while airborne).
+
+    this.previousLeftFoot!.copy(leftFoot);
+    this.previousRightFoot!.copy(rightFoot);
   }
 
   private getBonePosition(dataByPart: Map<BodyPart, BoneT>, bodyPart: BodyPart): THREE.Vector3 | null {
