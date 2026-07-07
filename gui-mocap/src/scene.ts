@@ -2,12 +2,82 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
 
+// One Euro Filter (Casiez et al.): an adaptive low-pass filter that smooths noise
+// heavily when the signal is nearly static but relaxes toward zero lag as the signal
+// starts moving quickly -- exactly the "filter noise without adding latency" behavior
+// walk-mode locomotion needs, since the same signal is static while standing and fast
+// while stepping.
+class OneEuroFilterScalar {
+  private xPrev: number | null = null;
+  private dxPrev = 0;
+
+  constructor(private minCutoff: number, private beta: number, private dCutoff: number) {}
+
+  private alpha(cutoff: number, dt: number): number {
+    const tau = 1 / (2 * Math.PI * cutoff);
+    return 1 / (1 + tau / dt);
+  }
+
+  reset(x: number) {
+    this.xPrev = x;
+    this.dxPrev = 0;
+  }
+
+  filter(x: number, dt: number): number {
+    if (this.xPrev == null) {
+      this.xPrev = x;
+      return x;
+    }
+    const dx = (x - this.xPrev) / dt;
+    const aD = this.alpha(this.dCutoff, dt);
+    this.dxPrev = aD * dx + (1 - aD) * this.dxPrev;
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dxPrev);
+    const a = this.alpha(cutoff, dt);
+    const xFiltered = a * x + (1 - a) * this.xPrev;
+    this.xPrev = xFiltered;
+    return xFiltered;
+  }
+}
+
+class OneEuroFilterVector3 {
+  private fx: OneEuroFilterScalar;
+  private fy: OneEuroFilterScalar;
+  private fz: OneEuroFilterScalar;
+  private out = new THREE.Vector3();
+
+  constructor(minCutoff: number, beta: number, dCutoff: number) {
+    this.fx = new OneEuroFilterScalar(minCutoff, beta, dCutoff);
+    this.fy = new OneEuroFilterScalar(minCutoff, beta, dCutoff);
+    this.fz = new OneEuroFilterScalar(minCutoff, beta, dCutoff);
+  }
+
+  reset(v: THREE.Vector3) {
+    this.fx.reset(v.x);
+    this.fy.reset(v.y);
+    this.fz.reset(v.z);
+  }
+
+  filter(v: THREE.Vector3, dt: number): THREE.Vector3 {
+    this.out.set(
+      this.fx.filter(v.x, dt),
+      this.fy.filter(v.y, dt),
+      this.fz.filter(v.z, dt),
+    );
+    return this.out;
+  }
+}
+
 const BONE_RADIUS = 0.02;
 const JOINT_RADIUS = 0.03;
-const FOOT_CONTACT_HEIGHT = 0.08;   // m above the floor plane still counts as ground contact
-const FOOT_CONTACT_SPEED = 0.5;     // m/s; a foot slower than this near the floor is "planted"
-const ROOT_SMOOTHING = 0.5;         // fraction of remaining root error applied per frame
-const MAX_ROOT_STEP = 0.15;         // m; per-frame clamp on root motion to reject detection spikes
+const FOOT_CONTACT_HEIGHT = 0.08;      // m above the floor plane that still counts as contact
+const FOOT_CONTACT_SPEED = 0.5;        // m/s; a foot slower than this near the floor is "planted"
+const CONTACT_DEBOUNCE_FRAMES = 3;     // frames a contact change must persist before it is trusted
+const STATIONARY_ENTER_SPEED = 0.06;   // m/s hip speed below which the body is treated as still
+const STATIONARY_EXIT_SPEED = 0.12;    // m/s hip speed above which the body starts translating
+const MAX_ROOT_STEP = 0.4;             // m/frame safety clamp; only catches glitch frames
+const EURO_MIN_CUTOFF = 1.2;           // Hz; lower = smoother when still
+const EURO_BETA = 0.7;                 // higher = less latency while moving
+const EURO_D_CUTOFF = 1.0;             // Hz; derivative cutoff
 
 const BONE_PARENT: Partial<Record<BodyPart, BodyPart>> = {
   [BodyPart.HEAD]: BodyPart.NECK,
@@ -134,12 +204,27 @@ export class MocapScene {
   // any global drift the server might apply, which is why it is robust.
   private hipWorldTarget = new THREE.Vector3(); // desired hip world position this frame
   private anchor = new THREE.Vector3();          // locked world position of the planted foot
-  private rootSmoothed = new THREE.Vector3();    // smoothed translation actually applied
+  private appliedRoot = new THREE.Vector3();     // last root translation actually applied
   private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
   private plantedGrounded = false;
+  // A contact-state change must persist this many frames before we trust it and
+  // re-anchor -- this is what tells intentional weight transfer apart from one noisy
+  // frame, so standing still can't slowly random-walk the root away from center.
+  private contactCandidate: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private contactCandidateFrames = 0;
+  // Horizontal-only stationary lock: while hip speed stays below the enter threshold the
+  // root's x/z are pinned to wherever they were when we went stationary, so sensor noise
+  // cannot accumulate into drift. Vertical (squat/sit) is never gated by this.
+  private stationary = false;
+  private stationaryLockX = 0;
+  private stationaryLockZ = 0;
   private walkActive = false;
+  private hipFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private leftFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private rightFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
   private previousLeftFoot: THREE.Vector3 | null = null;
   private previousRightFoot: THREE.Vector3 | null = null;
+  private previousHip: THREE.Vector3 | null = null;
   private lastPoseTime = performance.now();
 
   constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void) {
@@ -303,6 +388,17 @@ export class MocapScene {
     }
   }
 
+  /**
+   * Recenters walk-mode locomotion. Call this whenever the server's reference frame is
+   * reset (Reset Full/Yaw/Mounting) -- those change the frame the raw tracker positions
+   * are expressed in, so the client's calibration/anchor state must resync or the root
+   * will drift or fail to recenter.
+   */
+  resetLocomotion() {
+    this.poseCalibrated = false;
+    this.walkActive = false;
+  }
+
   update(bones: BoneT[], syntheticTrackers: TrackerDataT[] = [], walkEnabled = false) {
     if (this.mixamoLoaded) {
       this.applyMixamoPose(bones, syntheticTrackers, walkEnabled);
@@ -399,15 +495,14 @@ export class MocapScene {
     const rightFoot = trackerByPart.get(BodyPart.RIGHT_FOOT) ?? this.getBonePosition(dataByPart, BodyPart.RIGHT_FOOT);
     if (!hip || !leftFoot || !rightFoot || !this.mixamoScene) return;
 
+    const now = performance.now();
+    const dt = Math.max((now - this.lastPoseTime) / 1000, 1 / 120);
+    this.lastPoseTime = now;
+
     if (!this.poseCalibrated) {
       this.calibratedHip.copy(hip);
       this.floorY = Math.min(leftFoot.y, rightFoot.y);
-      this.hipWorldTarget.copy(hip);
-      this.rootSmoothed.set(0, 0, 0);
-      this.previousLeftFoot = leftFoot.clone();
-      this.previousRightFoot = rightFoot.clone();
-      this.plantedFoot = null;
-      this.plantedGrounded = false;
+      this.resetLocomotionState(hip, leftFoot, rightFoot);
       this.poseCalibrated = true;
     }
 
@@ -419,48 +514,68 @@ export class MocapScene {
       // Known-good path: vertical follows the server hip, no horizontal translation.
       rootBone.position.y += hip.y - this.calibratedHip.y;
       // Keep locomotion state parked at the current pose so re-enabling starts clean.
-      this.hipWorldTarget.copy(hip);
-      this.rootSmoothed.set(0, 0, 0);
-      this.plantedFoot = null;
-      this.plantedGrounded = false;
+      this.resetLocomotionState(hip, leftFoot, rightFoot);
       this.walkActive = false;
-      this.previousLeftFoot!.copy(leftFoot);
-      this.previousRightFoot!.copy(rightFoot);
-      this.lastPoseTime = performance.now();
       this.mixamoScene.position.set(0, 0, 0);
       return;
     }
 
     // Walk off -> on: start from the current pose with zero translation (no jump).
     if (!this.walkActive) {
-      this.hipWorldTarget.copy(hip);
-      this.rootSmoothed.set(0, 0, 0);
-      this.plantedFoot = null;
-      this.plantedGrounded = false;
-      this.previousLeftFoot!.copy(leftFoot);
-      this.previousRightFoot!.copy(rightFoot);
-      this.lastPoseTime = performance.now();
+      this.resetLocomotionState(hip, leftFoot, rightFoot);
       this.walkActive = true;
     }
 
-    this.solveFootLockRoot(hip, leftFoot, rightFoot);
+    // Filter noise out of the raw signal before it drives contact detection/anchoring.
+    // The One Euro filter relaxes toward zero lag as the signal speeds up, so this does
+    // not reintroduce the delay we removed from the output stage below.
+    const fHip = this.hipFilter.filter(hip, dt);
+    const fLeftFoot = this.leftFootFilter.filter(leftFoot, dt);
+    const fRightFoot = this.rightFootFilter.filter(rightFoot, dt);
 
-    // Translate the whole model by the solved hip displacement, smoothed and clamped.
-    const px = this.hipWorldTarget.x - this.calibratedHip.x;
-    const py = this.hipWorldTarget.y - this.calibratedHip.y;
-    const pz = this.hipWorldTarget.z - this.calibratedHip.z;
-    let sx = (px - this.rootSmoothed.x) * ROOT_SMOOTHING;
-    let sy = (py - this.rootSmoothed.y) * ROOT_SMOOTHING;
-    let sz = (pz - this.rootSmoothed.z) * ROOT_SMOOTHING;
-    const stepLen = Math.hypot(sx, sy, sz);
-    if (stepLen > MAX_ROOT_STEP) {
-      const scale = MAX_ROOT_STEP / stepLen;
-      sx *= scale; sy *= scale; sz *= scale;
+    this.solveFootLockRoot(fHip, fLeftFoot, fRightFoot, dt);
+
+    // Apply the solved hip displacement directly -- no extra smoothing stage -- so the
+    // root moves in lockstep with the (unsmoothed) leg rotations instead of trailing
+    // them. Only an outlier/glitch guard remains, sized well above any real stride.
+    const targetX = this.hipWorldTarget.x - this.calibratedHip.x;
+    const targetY = this.hipWorldTarget.y - this.calibratedHip.y;
+    const targetZ = this.hipWorldTarget.z - this.calibratedHip.z;
+    const dx = targetX - this.appliedRoot.x;
+    const dy = targetY - this.appliedRoot.y;
+    const dz = targetZ - this.appliedRoot.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > MAX_ROOT_STEP) {
+      const scale = MAX_ROOT_STEP / dist;
+      this.appliedRoot.x += dx * scale;
+      this.appliedRoot.y += dy * scale;
+      this.appliedRoot.z += dz * scale;
+    } else {
+      this.appliedRoot.set(targetX, targetY, targetZ);
     }
-    this.rootSmoothed.x += sx;
-    this.rootSmoothed.y += sy;
-    this.rootSmoothed.z += sz;
-    this.mixamoScene.position.set(this.rootSmoothed.x, this.rootSmoothed.y, this.rootSmoothed.z);
+    this.mixamoScene.position.copy(this.appliedRoot);
+  }
+
+  // Resets all locomotion state to "parked at the current pose, zero translation" --
+  // used on first calibration, on walk-mode enable, on walk-mode disable, and from
+  // resetLocomotion() (server Reset Full/Yaw/Mounting), so every one of those events
+  // starts clean instead of carrying over stale anchors from a different reference frame.
+  private resetLocomotionState(hip: THREE.Vector3, leftFoot: THREE.Vector3, rightFoot: THREE.Vector3) {
+    this.hipWorldTarget.copy(hip);
+    this.appliedRoot.set(0, 0, 0);
+    this.hipFilter.reset(hip);
+    this.leftFootFilter.reset(leftFoot);
+    this.rightFootFilter.reset(rightFoot);
+    this.plantedFoot = null;
+    this.plantedGrounded = false;
+    this.contactCandidate = null;
+    this.contactCandidateFrames = 0;
+    this.stationary = false;
+    this.stationaryLockX = 0;
+    this.stationaryLockZ = 0;
+    this.previousLeftFoot = leftFoot.clone();
+    this.previousRightFoot = rightFoot.clone();
+    this.previousHip = hip.clone();
   }
 
   /**
@@ -473,14 +588,28 @@ export class MocapScene {
    *    pushed down to keep the foot on the floor (instead of the foot floating up).
    *  - Walking: as the body passes over the stance foot, the hip advances by the full
    *    real stride in the leg's own direction.
+   *
+   * Two extra safeguards keep this stable at rest without adding lag while moving:
+   *  - Contact-state changes are debounced (CONTACT_DEBOUNCE_FRAMES) so a single noisy
+   *    frame cannot trigger a reanchor -- only a persistent change can. This is what
+   *    stops the root from randomly walking away from center while standing still.
+   *  - A horizontal-only "stationary lock" pins x/z to a fixed point whenever filtered
+   *    hip speed is near zero (hysteresis via enter/exit thresholds), so translation can
+   *    only happen in response to genuine, sustained movement. Vertical is never gated
+   *    by this, so squats/sitting still work while otherwise stationary.
    */
-  private solveFootLockRoot(hip: THREE.Vector3, leftFoot: THREE.Vector3, rightFoot: THREE.Vector3) {
-    const now = performance.now();
-    const dt = Math.max((now - this.lastPoseTime) / 1000, 1 / 120);
-    this.lastPoseTime = now;
-
+  private solveFootLockRoot(hip: THREE.Vector3, leftFoot: THREE.Vector3, rightFoot: THREE.Vector3, dt: number) {
     const leftSpeed = this.previousLeftFoot ? this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt : 0;
     const rightSpeed = this.previousRightFoot ? this.horizontalDistance(rightFoot, this.previousRightFoot) / dt : 0;
+    const hipSpeed = this.previousHip ? this.horizontalDistance(hip, this.previousHip) / dt : 0;
+
+    if (!this.stationary && hipSpeed < STATIONARY_ENTER_SPEED) {
+      this.stationary = true;
+      this.stationaryLockX = this.hipWorldTarget.x;
+      this.stationaryLockZ = this.hipWorldTarget.z;
+    } else if (this.stationary && hipSpeed > STATIONARY_EXIT_SPEED) {
+      this.stationary = false;
+    }
 
     const leftContact = leftFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT && leftSpeed <= FOOT_CONTACT_SPEED;
     const rightContact = rightFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT && rightSpeed <= FOOT_CONTACT_SPEED;
@@ -506,20 +635,38 @@ export class MocapScene {
         : false;
 
     if (this.plantedFoot != null && this.plantedGrounded && plantedContact) {
-      // Keep the current stance foot while it stays grounded (no flip-flop, no hysteresis
-      // needed): we only ever switch feet once the current one leaves the ground.
+      // Stance foot is still grounded -- keep it locked, no flip-flop.
+      this.contactCandidate = null;
+      this.contactCandidateFrames = 0;
     } else if (best != null) {
-      // (Re)acquire a stance foot. Re-anchor so the hip is continuous across the switch.
-      const foot = best === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
-      this.anchor.set(
-        this.hipWorldTarget.x + (foot.x - hip.x),
-        this.floorY,
-        this.hipWorldTarget.z + (foot.z - hip.z),
-      );
-      this.plantedFoot = best;
-      this.plantedGrounded = true;
+      // Current stance foot lost contact (or none is planted yet): debounce the switch
+      // so a single noisy frame can't force a reanchor, only a sustained change can.
+      const firstPlant = this.plantedFoot == null;
+      if (this.contactCandidate === best) {
+        this.contactCandidateFrames++;
+      } else {
+        this.contactCandidate = best;
+        this.contactCandidateFrames = 1;
+      }
+
+      if (firstPlant || this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
+        // (Re)acquire a stance foot. Re-anchor relative to the currently displayed hip
+        // position so the transition is continuous (no pop).
+        const foot = best === BodyPart.LEFT_FOOT ? leftFoot : rightFoot;
+        this.anchor.set(
+          this.hipWorldTarget.x + (foot.x - hip.x),
+          this.floorY,
+          this.hipWorldTarget.z + (foot.z - hip.z),
+        );
+        this.plantedFoot = best;
+        this.plantedGrounded = true;
+        this.contactCandidate = null;
+        this.contactCandidateFrames = 0;
+      }
     } else {
       // Both feet airborne (e.g. mid-run/jump): freeze the root until one lands.
+      this.contactCandidate = null;
+      this.contactCandidateFrames = 0;
       this.plantedGrounded = false;
     }
 
@@ -533,8 +680,14 @@ export class MocapScene {
     }
     // else: hold the previous hipWorldTarget (frozen root while airborne).
 
+    if (this.stationary) {
+      this.hipWorldTarget.x = this.stationaryLockX;
+      this.hipWorldTarget.z = this.stationaryLockZ;
+    }
+
     this.previousLeftFoot!.copy(leftFoot);
     this.previousRightFoot!.copy(rightFoot);
+    this.previousHip!.copy(hip);
   }
 
   private getBonePosition(dataByPart: Map<BodyPart, BoneT>, bodyPart: BodyPart): THREE.Vector3 | null {

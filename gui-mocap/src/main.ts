@@ -34,9 +34,9 @@ document.getElementById('controls')!.addEventListener('click', (e) => {
   const btn = (e.target as HTMLElement).closest('[data-cmd]') as HTMLElement;
   if (!btn) return;
   switch (btn.dataset.cmd) {
-    case 'reset-yaw': client.sendResetYaw(); break;
-    case 'reset-full': client.sendResetFull(); break;
-    case 'reset-mounting': client.sendResetMounting(); break;
+    case 'reset-yaw': client.sendResetYaw(); scene.resetLocomotion(); break;
+    case 'reset-full': client.sendResetFull(); scene.resetLocomotion(); break;
+    case 'reset-mounting': client.sendResetMounting(); scene.resetLocomotion(); break;
     case 'autobone-record': client.sendAutoBoneRecord(); break;
     case 'autobone-process': client.sendAutoBoneProcess(); break;
     case 'autobone-apply': client.sendAutoBoneApply(); break;
