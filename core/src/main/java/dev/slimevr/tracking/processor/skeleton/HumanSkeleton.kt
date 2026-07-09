@@ -823,9 +823,12 @@ class HumanSkeleton(
 			}
 
 			// Hip and hip tracker
+			// Use yaw-only to prevent tracker pitch/roll from tilting the lower body.
+			// Pitch/roll for upper body lean comes from chest/waist trackers above.
 			getFirstAvailableTracker(hipTracker, waistTracker, chestTracker, upperChestTracker)?.let {
-				hipBone.setRotation(it.getRotation())
-				hipTrackerBone.setRotation(it.getRotation())
+				val yawRot = it.getRotation().project(POS_Y).unit()
+				hipBone.setRotation(yawRot)
+				hipTrackerBone.setRotation(yawRot)
 			}
 		} else if (headTracker != null) {
 			// Align with neck's yaw
@@ -919,9 +922,12 @@ class HumanSkeleton(
 			hipTrackerBone.setRotation(newHipRot)
 		}
 
-		// Set left and right hip rotations to the hip's
-		leftHipBone.setRotation(hipBone.getLocalRotation())
-		rightHipBone.setRotation(hipBone.getLocalRotation())
+		// Left and right hip bones only offset the legs laterally from center.
+		// Using identity avoids compounding pitch/roll from the hip tracker
+		// through the lateral offset, which would cause the model to tilt/lean
+		// during yaw (the constraint on these bones already limits twist to 0)
+		leftHipBone.setRotation(IDENTITY)
+		rightHipBone.setRotation(IDENTITY)
 	}
 
 	/**
@@ -943,8 +949,10 @@ class HumanSkeleton(
 			// Get upper leg rotation
 			legRot = it.getRotation()
 		} ?: run {
-			// Use hip's yaw
-			legRot = hipBone.getLocalRotation().project(POS_Y).unit()
+			// Hip yaw already propagates through parent bone hierarchy
+			// (hipBone -> leftHipBone/rightHipBone -> upperLegBone),
+			// so use identity to avoid double-yaw
+			legRot = IDENTITY
 		}
 		// Set upper leg rotation
 		upperLegBone.setRotation(legRot)
