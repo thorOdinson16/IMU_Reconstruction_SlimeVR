@@ -177,6 +177,7 @@ export class MocapScene {
   private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
   private animFrameId = 0;
+  private postRenderCallback: (() => void) | null = null;
 
   private nodes = new Map<BodyPart, { mesh: THREE.Mesh; joint: THREE.Mesh }>();
   private boneLines = new Map<string, THREE.Mesh>();
@@ -239,7 +240,7 @@ export class MocapScene {
   constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void) {
     this.onModelStatus = onModelStatus ?? null;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(canvas.parentElement!.clientWidth, canvas.parentElement!.clientHeight);
     this.renderer.shadowMap.enabled = true;
@@ -849,8 +850,15 @@ private updateRootAndPelvis(
     const animate = () => {
       this.animFrameId = requestAnimationFrame(animate);
       this.renderer.render(this.scene, this.camera);
+      if (this.postRenderCallback) {
+        this.postRenderCallback();
+      }
     };
     animate();
+  }
+
+  setPostRenderCallback(cb: (() => void) | null) {
+    this.postRenderCallback = cb;
   }
 
   stop() {

@@ -24,24 +24,37 @@ import {
 } from 'solarxr-protocol';
 
 type BoneCallback = (bones: BoneT[], syntheticTrackers: TrackerDataT[], index: number) => void;
+type TextCallback = (msg: string) => void;
+type StatusCallback = (connected: boolean, msg: string) => void;
+type TrackerCountCallback = (count: number) => void;
 
 export class ProtocolClient {
   private ws: WebSocket | null = null;
   private url: string;
   private onBones: BoneCallback;
-  private onStatus: (connected: boolean, msg: string) => void;
-  private onTrackerCount: (count: number) => void;
+  private onStatus: StatusCallback;
+  private onTrackerCount: TrackerCountCallback;
+  private onText: TextCallback | null = null;
 
   constructor(
     url: string,
     onBones: BoneCallback,
-    onStatus: (connected: boolean, msg: string) => void,
-    onTrackerCount: (count: number) => void,
+    onStatus: StatusCallback,
+    onTrackerCount: TrackerCountCallback,
   ) {
     this.url = url;
     this.onBones = onBones;
     this.onStatus = onStatus;
     this.onTrackerCount = onTrackerCount;
+  }
+
+  setTextCallback(cb: TextCallback) {
+    this.onText = cb;
+  }
+
+  sendText(msg: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(msg);
   }
 
   connect() {
@@ -67,6 +80,8 @@ export class ProtocolClient {
     this.ws.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
         this.handleMessage(new Uint8Array(ev.data));
+      } else if (typeof ev.data === 'string') {
+        if (this.onText) this.onText(ev.data);
       }
     };
   }
@@ -199,5 +214,17 @@ export class ProtocolClient {
       this.ws.close();
       this.ws = null;
     }
+  }
+
+  sendRecordStart() {
+    this.sendText('RECORD:START');
+  }
+
+  sendRecordStop() {
+    this.sendText('RECORD:STOP');
+  }
+
+  sendCsvEvent(label: string) {
+    this.sendText('CSV_EVENT:' + label);
   }
 }

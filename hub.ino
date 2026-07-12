@@ -11,7 +11,7 @@ const char* ssid       = "TP-Link_DF6C_Cave";
 const char* password   = "Caveiot@123";
 
 const char* server_ip1 = "192.168.1.217"; // "192.168.0.104"
-const char* server_ip2 = "192.168.1.159"; // "192.168.0.110"
+const char* server_ip2 = "192.168.1.159"; // "192.168.0.103"
 const unsigned int port   = 5005;
 
 const int LED_RED   = 1;

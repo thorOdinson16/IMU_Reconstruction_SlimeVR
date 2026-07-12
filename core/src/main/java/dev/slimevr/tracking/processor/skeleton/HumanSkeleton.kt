@@ -823,12 +823,10 @@ class HumanSkeleton(
 			}
 
 			// Hip and hip tracker
-			// Use yaw-only to prevent tracker pitch/roll from tilting the lower body.
-			// Pitch/roll for upper body lean comes from chest/waist trackers above.
 			getFirstAvailableTracker(hipTracker, waistTracker, chestTracker, upperChestTracker)?.let {
-				val yawRot = it.getRotation().project(POS_Y).unit()
-				hipBone.setRotation(yawRot)
-				hipTrackerBone.setRotation(yawRot)
+				val fullRot = it.getRotation()
+				hipBone.setRotation(fullRot)
+				hipTrackerBone.setRotation(fullRot)
 			}
 		} else if (headTracker != null) {
 			// Align with neck's yaw
@@ -851,8 +849,9 @@ class HumanSkeleton(
 						var hipRot = it.getRotation()
 						var chestRot = chest.getRotation()
 
-						// Interpolate between the chest and the hip
-						chestRot = chestRot.interpQ(hipRot, waistFromChestHipAveraging)
+						// Interpolate between the chest and the hip in rotation space
+						// so q/-q sign flips do not introduce discontinuities.
+						chestRot = chestRot.interpR(hipRot, waistFromChestHipAveraging)
 
 						// Set waist's rotation
 						waistBone.setRotation(chestRot)
@@ -863,8 +862,9 @@ class HumanSkeleton(
 							var rightLegRot = rightUpperLegTracker?.getRotation() ?: IDENTITY
 							var chestRot = chest.getRotation()
 
-							// Interpolate between the pelvis, averaged from the legs, and the chest
-							chestRot = chestRot.interpQ(leftLegRot.lerpQ(rightLegRot, 0.5f), waistFromChestLegsAveraging).unit()
+							// Interpolate between the pelvis, averaged from the legs, and the chest.
+							// Use rotation-space averaging/interpolation to keep continuity across q/-q.
+							chestRot = chestRot.interpR(averageRotation(leftLegRot, rightLegRot), waistFromChestLegsAveraging).unit()
 
 							// Set waist's rotation
 							waistBone.setRotation(chestRot)
@@ -879,8 +879,9 @@ class HumanSkeleton(
 					var rightLegRot = rightUpperLegTracker?.getRotation() ?: IDENTITY
 					var waistRot = it.getRotation()
 
-					// Interpolate between the pelvis, averaged from the legs, and the chest
-					waistRot = waistRot.interpQ(leftLegRot.lerpQ(rightLegRot, 0.5f), hipFromWaistLegsAveraging).unit()
+					// Interpolate between the pelvis, averaged from the legs, and the chest.
+					// Use rotation-space averaging/interpolation to keep continuity across q/-q.
+					waistRot = waistRot.interpR(averageRotation(leftLegRot, rightLegRot), hipFromWaistLegsAveraging).unit()
 
 					// Set hip rotation
 					hipBone.setRotation(waistRot)
@@ -892,8 +893,9 @@ class HumanSkeleton(
 						var rightLegRot = rightUpperLegTracker?.getRotation() ?: IDENTITY
 						var chestRot = it.getRotation()
 
-						// Interpolate between the pelvis, averaged from the legs, and the chest
-						chestRot = chestRot.interpQ(leftLegRot.lerpQ(rightLegRot, 0.5f), hipFromChestLegsAveraging).unit()
+						// Interpolate between the pelvis, averaged from the legs, and the chest.
+						// Use rotation-space averaging/interpolation to keep continuity across q/-q.
+						chestRot = chestRot.interpR(averageRotation(leftLegRot, rightLegRot), hipFromChestLegsAveraging).unit()
 
 						// Set hip rotation
 						hipBone.setRotation(chestRot)
@@ -1138,6 +1140,12 @@ class HumanSkeleton(
 	}
 
 	/**
+	 * Averages two rotations in rotation space (rather than quaternion space)
+	 * to keep continuity when one input crosses between q and -q.
+	 */
+	private fun averageRotation(left: Quaternion, right: Quaternion): Quaternion = left.lerpR(right, 0.5f).unit()
+
+	/**
 	 * Rotates the third Quaternion to match its yaw and roll to the rotation of
 	 * the average of the first and second quaternions.
 	 *
@@ -1155,7 +1163,7 @@ class HumanSkeleton(
 		// C = Quaternion(R.w, -R.x, 0, 0)
 		// Pelvis = Hip * R * C
 		// normalize(Pelvis)
-		val r = hip.inv() * (leftKnee + rightKnee)
+		val r = hip.inv() * averageRotation(leftKnee, rightKnee)
 		val c = Quaternion(r.w, -r.x, 0f, 0f)
 		return (hip * r * c).unit()
 	}
