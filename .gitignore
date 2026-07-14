@@ -41,3 +41,4 @@ repomix-output.md
 /RecordLogs/
 *.log
 .env.local
+*.pdf

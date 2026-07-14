@@ -124,6 +124,11 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 		private set
 	private var bufferInvalid = true
 
+	// passive floor capture: automatically recalibrates floor when standing still
+	private var passiveFloorCaptureTimer = 0f
+	private var passiveFloorPreviousHip = Vector3.NULL
+	private var passiveFloorLastTimeNanos = 0L
+
 	constructor(skeleton: HumanSkeleton, config: LegTweaksConfig) : this(skeleton) {
 		this.config = config
 		updateConfig()
@@ -217,6 +222,9 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 		skeleton.computedRightKneeTracker?.position = rightKneePosition
 		skeleton.computedLeftFootTracker?.position = leftFootPosition
 		skeleton.computedRightFootTracker?.position = rightFootPosition
+
+		// Passive floor capture: recalibrate floor level while standing still
+		capturePassiveFloor()
 	}
 
 	// update the hyperparameters with the config
@@ -241,6 +249,40 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 	private fun setFloorLevel(floorLevel: Float) {
 		this.floorLevel = floorLevel
 		hipToFloorDist = hipPosition.y - floorLevel
+	}
+
+	private fun capturePassiveFloor() {
+		if (skeleton.leftFootTracker == null || skeleton.rightFootTracker == null) {
+			passiveFloorCaptureTimer = 0f
+			passiveFloorLastTimeNanos = 0L
+			return
+		}
+
+		val nowNanos = bufferHead.timeOfFrame
+		if (passiveFloorLastTimeNanos == 0L) {
+			passiveFloorPreviousHip = hipPosition
+			passiveFloorLastTimeNanos = nowNanos
+			return
+		}
+
+		val delta = ((nowNanos - passiveFloorLastTimeNanos) / LegTweaksBuffer.NS_CONVERT).coerceAtLeast(1e-9f)
+		passiveFloorLastTimeNanos = nowNanos
+
+		val hipSpeed = (hipPosition - passiveFloorPreviousHip).len() / delta
+		passiveFloorPreviousHip = hipPosition
+
+		if (hipSpeed < 0.05f) {
+			passiveFloorCaptureTimer += delta
+			if (passiveFloorCaptureTimer > 2.0f) {
+				setFloorLevel(
+					min(leftFootPosition.y, rightFootPosition.y) +
+						FLOOR_CALIBRATION_OFFSET,
+				)
+				passiveFloorCaptureTimer = 0f
+			}
+		} else {
+			passiveFloorCaptureTimer = 0f
+		}
 	}
 
 	// set the vectors in this object to the vectors in the skeleton

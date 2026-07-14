@@ -536,7 +536,15 @@ class HumanSkeleton(
 	}
 
 	/**
-	 * Updates the pose from tracker positions
+	 * Updates the pose from tracker positions.
+	 * Follows a strict hierarchical pipeline:
+	 * 1. Head & Spine transforms (reference frame)
+	 * 2. Leg transforms (depend on pelvis)
+	 * 3. Arm transforms (depend on upper body)
+	 * 4. Finger transforms
+	 * 5. Bone hierarchy resolution
+	 * 6. Pelvis contact adjustment (bottom-up from planted foot)
+	 * 7. Post-processing (leg tweaks, localization)
 	 */
 	@VRServerThread
 	fun updatePose() {
@@ -545,18 +553,95 @@ class HumanSkeleton(
 
 		StayAligned.adjustNextTracker(trackerSkeleton, stayAlignedConfig)
 
-		updateTransforms()
+		// Step 1: Head & Spine transforms (Reference frame for upper body)
+		updateHeadTransforms()
+		if (pauseTracking) {
+			updateBones()
+			if (enforceConstraints) {
+				// TODO re-enable toggling correctConstraints once
+				// https://github.com/SlimeVR/SlimeVR-Server/issues/1297 is solved
+				headBone.updateWithConstraints(false)
+			}
+			updateComputedTrackers()
+			return
+		}
+		updateSpineTransforms()
+
+		// Step 2: Leg transforms (Depend on pelvis position)
+		updateLegTransforms(
+			leftUpperLegBone, leftKneeTrackerBone, leftLowerLegBone, leftFootBone, leftFootTrackerBone,
+			leftUpperLegTracker, leftLowerLegTracker, leftFootTracker,
+		)
+		updateLegTransforms(
+			rightUpperLegBone, rightKneeTrackerBone, rightLowerLegBone, rightFootBone, rightFootTrackerBone,
+			rightUpperLegTracker, rightLowerLegTracker, rightFootTracker,
+		)
+
+		// Step 3: Arm transforms (Depend on upper body / chest)
+		updateArmTransforms(
+			isTrackingLeftArmFromController, leftUpperShoulderBone, leftShoulderBone, leftUpperArmBone,
+			leftElbowTrackerBone, leftLowerArmBone, leftHandBone, leftHandTrackerBone,
+			leftShoulderTracker, leftUpperArmTracker, leftLowerArmTracker, leftHandTracker,
+		)
+		updateArmTransforms(
+			isTrackingRightArmFromController, rightUpperShoulderBone, rightShoulderBone, rightUpperArmBone,
+			rightElbowTrackerBone, rightLowerArmBone, rightHandBone, rightHandTrackerBone,
+			rightShoulderTracker, rightUpperArmTracker, rightLowerArmTracker, rightHandTracker,
+		)
+
+		// Step 4: Finger transforms
+		updateFingerTransforms(
+			leftHandTrackerBone.getGlobalRotation(), leftThumbMetacarpalBone, leftThumbProximalBone, leftThumbDistalBone,
+			leftThumbMetacarpalTracker, leftThumbProximalTracker, leftThumbDistalTracker,
+		)
+		updateFingerTransforms(
+			leftHandTrackerBone.getGlobalRotation(), leftIndexProximalBone, leftIndexIntermediateBone, leftIndexDistalBone,
+			leftIndexProximalTracker, leftIndexIntermediateTracker, leftIndexDistalTracker,
+		)
+		updateFingerTransforms(
+			leftHandTrackerBone.getGlobalRotation(), leftMiddleProximalBone, leftMiddleIntermediateBone, leftMiddleDistalBone,
+			leftMiddleProximalTracker, leftMiddleIntermediateTracker, leftMiddleDistalTracker,
+		)
+		updateFingerTransforms(
+			leftHandTrackerBone.getGlobalRotation(), leftRingProximalBone, leftRingIntermediateBone, leftRingDistalBone,
+			leftRingProximalTracker, leftRingIntermediateTracker, leftRingDistalTracker,
+		)
+		updateFingerTransforms(
+			leftHandTrackerBone.getGlobalRotation(), leftLittleProximalBone, leftLittleIntermediateBone, leftLittleDistalBone,
+			leftLittleProximalTracker, leftLittleIntermediateTracker, leftLittleDistalTracker,
+		)
+		updateFingerTransforms(
+			rightHandTrackerBone.getGlobalRotation(), rightThumbMetacarpalBone, rightThumbProximalBone, rightThumbDistalBone,
+			rightThumbMetacarpalTracker, rightThumbProximalTracker, rightThumbDistalTracker,
+		)
+		updateFingerTransforms(
+			rightHandTrackerBone.getGlobalRotation(), rightIndexProximalBone, rightIndexIntermediateBone, rightIndexDistalBone,
+			rightIndexProximalTracker, rightIndexIntermediateTracker, rightIndexDistalTracker,
+		)
+		updateFingerTransforms(
+			rightHandTrackerBone.getGlobalRotation(), rightMiddleProximalBone, rightMiddleIntermediateBone, rightMiddleDistalBone,
+			rightMiddleProximalTracker, rightMiddleIntermediateTracker, rightMiddleDistalTracker,
+		)
+		updateFingerTransforms(
+			rightHandTrackerBone.getGlobalRotation(), rightRingProximalBone, rightRingIntermediateBone, rightRingDistalBone,
+			rightRingProximalTracker, rightRingIntermediateTracker, rightRingDistalTracker,
+		)
+		updateFingerTransforms(
+			rightHandTrackerBone.getGlobalRotation(), rightLittleProximalBone, rightLittleIntermediateBone, rightLittleDistalBone,
+			rightLittleProximalTracker, rightLittleIntermediateTracker, rightLittleDistalTracker,
+		)
+
+		// Step 5: Resolve bone hierarchy
 		updateBones()
 		if (enforceConstraints) {
-			// TODO re-enable toggling correctConstraints once
-			// https://github.com/SlimeVR/SlimeVR-Server/issues/1297 is solved
 			headBone.updateWithConstraints(false)
 		}
 		updateComputedTrackers()
 
-		// Don't run post-processing if the tracking is paused
-		if (pauseTracking) return
+		// Step 6: Pelvis contact adjustment (bottom-up from planted foot, or top-down inertia)
+		updatePelvisFromContact()
 
+		// Step 7: Post-processing
 		legTweaks.tweakLegs()
 		localizer.update()
 		if (localizer.getEnabled()) headBone.update()
@@ -582,183 +667,59 @@ class HumanSkeleton(
 	}
 
 	/**
-	 * Update all the bones' transforms from trackers
+	 * Adjusts the pelvis/hip tracker position based on foot contact state.
+	 *
+	 * Bottom-Up (at least one foot LOCKED): compute hip position by anchoring
+	 * the planted foot to its previous corrected position. This prevents
+	 * pelvis drift when a foot is stationary on the ground.
+	 *
+	 * Top-Down (both feet UNLOCKED): no adjustment; pelvis stays where the
+	 * spine chain + localizer put it, letting legs swing freely.
 	 */
-	private fun updateTransforms() {
-		// Head
-		updateHeadTransforms()
+	private fun updatePelvisFromContact() {
+		val bufferHead = legTweaks.bufferHead
+		val leftLocked = bufferHead.leftLegState == LegTweaksBuffer.LOCKED
+		val rightLocked = bufferHead.rightLegState == LegTweaksBuffer.LOCKED
 
-		// Stop at head (for the body to follow) if tracking is paused
-		if (pauseTracking) return
+		if (!leftLocked && !rightLocked) return
 
-		// Spine
-		updateSpineTransforms()
+		val bufPrev = bufferHead.parent ?: return
+		val hipPos = computedHipTracker?.position ?: return
 
-		// Left leg
-		updateLegTransforms(
-			leftUpperLegBone,
-			leftKneeTrackerBone,
-			leftLowerLegBone,
-			leftFootBone,
-			leftFootTrackerBone,
-			leftUpperLegTracker,
-			leftLowerLegTracker,
-			leftFootTracker,
-		)
-
-		// Right leg
-		updateLegTransforms(
-			rightUpperLegBone,
-			rightKneeTrackerBone,
-			rightLowerLegBone,
-			rightFootBone,
-			rightFootTrackerBone,
-			rightUpperLegTracker,
-			rightLowerLegTracker,
-			rightFootTracker,
-		)
-
-		// Left arm
-		updateArmTransforms(
-			isTrackingLeftArmFromController,
-			leftUpperShoulderBone,
-			leftShoulderBone,
-			leftUpperArmBone,
-			leftElbowTrackerBone,
-			leftLowerArmBone,
-			leftHandBone,
-			leftHandTrackerBone,
-			leftShoulderTracker,
-			leftUpperArmTracker,
-			leftLowerArmTracker,
-			leftHandTracker,
-		)
-
-		// Right arm
-		updateArmTransforms(
-			isTrackingRightArmFromController,
-			rightUpperShoulderBone,
-			rightShoulderBone,
-			rightUpperArmBone,
-			rightElbowTrackerBone,
-			rightLowerArmBone,
-			rightHandBone,
-			rightHandTrackerBone,
-			rightShoulderTracker,
-			rightUpperArmTracker,
-			rightLowerArmTracker,
-			rightHandTracker,
-		)
-
-		// Left thumb
-		updateFingerTransforms(
-			leftHandTrackerBone.getGlobalRotation(),
-			leftThumbMetacarpalBone,
-			leftThumbProximalBone,
-			leftThumbDistalBone,
-			leftThumbMetacarpalTracker,
-			leftThumbProximalTracker,
-			leftThumbDistalTracker,
-		)
-
-		// Left index
-		updateFingerTransforms(
-			leftHandTrackerBone.getGlobalRotation(),
-			leftIndexProximalBone,
-			leftIndexIntermediateBone,
-			leftIndexDistalBone,
-			leftIndexProximalTracker,
-			leftIndexIntermediateTracker,
-			leftIndexDistalTracker,
-		)
-
-		// Left middle
-		updateFingerTransforms(
-			leftHandTrackerBone.getGlobalRotation(),
-			leftMiddleProximalBone,
-			leftMiddleIntermediateBone,
-			leftMiddleDistalBone,
-			leftMiddleProximalTracker,
-			leftMiddleIntermediateTracker,
-			leftMiddleDistalTracker,
-		)
-
-		// Left ring
-		updateFingerTransforms(
-			leftHandTrackerBone.getGlobalRotation(),
-			leftRingProximalBone,
-			leftRingIntermediateBone,
-			leftRingDistalBone,
-			leftRingProximalTracker,
-			leftRingIntermediateTracker,
-			leftRingDistalTracker,
-		)
-
-		// Left little
-		updateFingerTransforms(
-			leftHandTrackerBone.getGlobalRotation(),
-			leftLittleProximalBone,
-			leftLittleIntermediateBone,
-			leftLittleDistalBone,
-			leftLittleProximalTracker,
-			leftLittleIntermediateTracker,
-			leftLittleDistalTracker,
-		)
-
-		// Right thumb
-		updateFingerTransforms(
-			rightHandTrackerBone.getGlobalRotation(),
-			rightThumbMetacarpalBone,
-			rightThumbProximalBone,
-			rightThumbDistalBone,
-			rightThumbMetacarpalTracker,
-			rightThumbProximalTracker,
-			rightThumbDistalTracker,
-		)
-
-		// Right index
-		updateFingerTransforms(
-			rightHandTrackerBone.getGlobalRotation(),
-			rightIndexProximalBone,
-			rightIndexIntermediateBone,
-			rightIndexDistalBone,
-			rightIndexProximalTracker,
-			rightIndexIntermediateTracker,
-			rightIndexDistalTracker,
-		)
-
-		// Right middle
-		updateFingerTransforms(
-			rightHandTrackerBone.getGlobalRotation(),
-			rightMiddleProximalBone,
-			rightMiddleIntermediateBone,
-			rightMiddleDistalBone,
-			rightMiddleProximalTracker,
-			rightMiddleIntermediateTracker,
-			rightMiddleDistalTracker,
-		)
-
-		// Right ring
-		updateFingerTransforms(
-			rightHandTrackerBone.getGlobalRotation(),
-			rightRingProximalBone,
-			rightRingIntermediateBone,
-			rightRingDistalBone,
-			rightRingProximalTracker,
-			rightRingIntermediateTracker,
-			rightRingDistalTracker,
-		)
-
-		// Right little
-		updateFingerTransforms(
-			rightHandTrackerBone.getGlobalRotation(),
-			rightLittleProximalBone,
-			rightLittleIntermediateBone,
-			rightLittleDistalBone,
-			rightLittleProximalTracker,
-			rightLittleIntermediateTracker,
-			rightLittleDistalTracker,
-		)
+		if (leftLocked && rightLocked) {
+			val leftFootPos = computedLeftFootTracker?.position ?: return
+			val rightFootPos = computedRightFootTracker?.position ?: return
+			val leftCorr = Vector3(
+				bufPrev.leftFootPositionCorrected.x - leftFootPos.x,
+				0f,
+				bufPrev.leftFootPositionCorrected.z - leftFootPos.z,
+			)
+			val rightCorr = Vector3(
+				bufPrev.rightFootPositionCorrected.x - rightFootPos.x,
+				0f,
+				bufPrev.rightFootPositionCorrected.z - rightFootPos.z,
+			)
+			val avgCorr = (leftCorr + rightCorr) * 0.5f
+			computedHipTracker!!.position = Vector3(
+				hipPos.x + avgCorr.x,
+				hipPos.y,
+				hipPos.z + avgCorr.z,
+			)
+		} else if (leftLocked) {
+			val footPos = computedLeftFootTracker?.position ?: return
+			computedHipTracker!!.position = Vector3(
+				hipPos.x + bufPrev.leftFootPositionCorrected.x - footPos.x,
+				hipPos.y,
+				hipPos.z + bufPrev.leftFootPositionCorrected.z - footPos.z,
+			)
+		} else {
+			val footPos = computedRightFootTracker?.position ?: return
+			computedHipTracker!!.position = Vector3(
+				hipPos.x + bufPrev.rightFootPositionCorrected.x - footPos.x,
+				hipPos.y,
+				hipPos.z + bufPrev.rightFootPositionCorrected.z - footPos.z,
+			)
+		}
 	}
 
 	/**
@@ -824,9 +785,9 @@ class HumanSkeleton(
 
 			// Hip and hip tracker
 			getFirstAvailableTracker(hipTracker, waistTracker, chestTracker, upperChestTracker)?.let {
-				val fullRot = it.getRotation()
-				hipBone.setRotation(fullRot)
-				hipTrackerBone.setRotation(fullRot)
+				val yawRot = it.getRotation().project(POS_Y).unit()
+				hipBone.setRotation(yawRot)
+				hipTrackerBone.setRotation(yawRot)
 			}
 		} else if (headTracker != null) {
 			// Align with neck's yaw

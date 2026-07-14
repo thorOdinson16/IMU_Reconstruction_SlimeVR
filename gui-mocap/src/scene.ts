@@ -13,6 +13,10 @@ class OneEuroFilterScalar {
 
   constructor(private minCutoff: number, private beta: number, private dCutoff: number) {}
 
+  setMinCutoff(cutoff: number) {
+    this.minCutoff = cutoff;
+  }
+
   private alpha(cutoff: number, dt: number): number {
     const tau = 1 / (2 * Math.PI * cutoff);
     return 1 / (1 + tau / dt);
@@ -55,6 +59,12 @@ class OneEuroFilterVector3 {
     this.fx.reset(v.x);
     this.fy.reset(v.y);
     this.fz.reset(v.z);
+  }
+
+  setMinCutoff(cutoff: number) {
+    this.fx.setMinCutoff(cutoff);
+    this.fy.setMinCutoff(cutoff);
+    this.fz.setMinCutoff(cutoff);
   }
 
   filter(v: THREE.Vector3, dt: number): THREE.Vector3 {
@@ -223,6 +233,9 @@ export class MocapScene {
   private stationaryLockZ = 0;
   private walkActive = false;
   private plantJustChanged = false;
+  private leftContact = false;
+  private rightContact = false;
+  private currentFilterCutoff = EURO_MIN_CUTOFF;
   private floorYModel = 0;
   private floorCaptured = false;
   private _lFootWorld = new THREE.Vector3();
@@ -550,6 +563,9 @@ private updateRootAndPelvis(
     // Decide which foot is planted (+ debounced weight transfer). The actual root
     // translation happens later, in applyFootPlant(), using the POSED foot.
     this.updateFootContact(fLeftFoot, fRightFoot, dt);
+
+    // Adapt filter strength based on contact: planted = more smoothing, swinging = less latency
+    this.updateFilterCutoffs();
   }
 
   // Resets all locomotion state to "parked at the current pose, zero translation" --
@@ -654,6 +670,19 @@ private updateRootAndPelvis(
 
     this.previousLeftFoot!.copy(leftFoot);
     this.previousRightFoot!.copy(rightFoot);
+    this.leftContact = leftContact;
+    this.rightContact = rightContact;
+  }
+
+  private updateFilterCutoffs() {
+    const planted = this.leftContact || this.rightContact;
+    const cutoff = planted ? 0.8 : 2.5;
+    if (this.currentFilterCutoff !== cutoff) {
+      this.currentFilterCutoff = cutoff;
+      this.hipFilter.setMinCutoff(cutoff);
+      this.leftFootFilter.setMinCutoff(cutoff);
+      this.rightFootFilter.setMinCutoff(cutoff);
+    }
   }
 
   // Runs AFTER the whole skeleton has been posed from the rotation stream. Translates
