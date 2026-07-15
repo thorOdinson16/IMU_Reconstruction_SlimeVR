@@ -1,5 +1,10 @@
 import { ProtocolClient } from './protocol';
 import { MocapScene } from './scene';
+import { PoseManager } from './pose/PoseManager';
+import { YogaModule } from './applications/yoga/YogaModule';
+import { JointScore } from './pose/types';
+import tadasana from './applications/yoga/poses/tadasana';
+import vrikshasana from './applications/yoga/poses/vrikshasana';
 
 const connStatus = document.getElementById('conn-status')!;
 const trackerCount = document.getElementById('tracker-count')!;
@@ -7,6 +12,12 @@ const modelStatus = document.getElementById('model-status')!;
 const recIndicator = document.getElementById('rec-indicator')!;
 const recTimer = document.getElementById('rec-timer')!;
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
+const yogaEnable = document.getElementById('yoga-enable') as HTMLInputElement;
+const yogaBody = document.getElementById('yoga-body')!;
+const yogaPoseSelect = document.getElementById('yoga-pose-select') as HTMLSelectElement;
+const yogaScore = document.getElementById('yoga-score')!;
+const yogaHold = document.getElementById('yoga-hold')!;
+const yogaStatus = document.getElementById('yoga-status')!;
 
 const WS_URL = `ws://${location.hostname}:21110`;
 
@@ -14,6 +25,68 @@ const scene = new MocapScene(canvas, (status) => {
   modelStatus.textContent = status;
 });
 scene.start();
+
+let lastPoseTime = performance.now();
+const poseManager = new PoseManager();
+const yogaModule = new YogaModule([tadasana, vrikshasana]);
+poseManager.register('yoga', yogaModule);
+
+const yogaPoses = yogaModule.getPoseList();
+for (const p of yogaPoses) {
+  const opt = document.createElement('option');
+  opt.value = String(p.index);
+  opt.textContent = p.name;
+  yogaPoseSelect.appendChild(opt);
+}
+
+yogaEnable.addEventListener('change', () => {
+  if (yogaEnable.checked) {
+    poseManager.activate('yoga');
+    yogaBody.style.display = 'block';
+    yogaPoseSelect.value = '0';
+    yogaModule.selectPose(0);
+  } else {
+    poseManager.deactivate();
+    yogaBody.style.display = 'none';
+    scene.setJointScores(null);
+    yogaScore.textContent = '--';
+    yogaHold.textContent = '--';
+    yogaStatus.textContent = '--';
+  }
+});
+
+yogaPoseSelect.addEventListener('change', () => {
+  const idx = parseInt(yogaPoseSelect.value, 10);
+  yogaModule.selectPose(idx);
+});
+
+function updateYogaUI(scores: JointScore[] | null) {
+  if (!yogaEnable.checked || !scores) {
+    scene.setJointScores(null);
+    return;
+  }
+  scene.setJointScores(scores);
+
+  const lastScore = yogaModule.getLastScore();
+  if (!lastScore) return;
+
+  yogaScore.textContent = `${(lastScore.smoothedScore * 100).toFixed(0)}%`;
+
+  if (lastScore.completionState === 'holding' || lastScore.completionState === 'completed') {
+    yogaHold.textContent = `${lastScore.holdElapsed.toFixed(1)} / ${lastScore.holdDuration} sec`;
+  } else {
+    yogaHold.textContent = '--';
+  }
+
+  yogaStatus.textContent = yogaModule.getStatusText();
+
+  if (yogaModule.getCompleted()) {
+    yogaStatus.textContent = 'Completed';
+    yogaStatus.style.color = '#0f0';
+  } else {
+    yogaStatus.style.color = '';
+  }
+}
 
 const offscreen = document.createElement('canvas');
 let offscreenCtx: CanvasRenderingContext2D | null = null;
@@ -107,7 +180,18 @@ scene.setPostRenderCallback(() => {
 
 const client = new ProtocolClient(
   WS_URL,
-  (bones, syntheticTrackers, _index) => scene.update(bones, syntheticTrackers, walkEnabled),
+  (bones, syntheticTrackers, _index) => {
+    scene.update(bones, syntheticTrackers, walkEnabled);
+    if (yogaEnable.checked) {
+      const now = performance.now();
+      const dt = Math.min((now - lastPoseTime) / 1000, 0.5);
+      lastPoseTime = now;
+      const result = poseManager.update(bones, dt);
+      if (result) {
+        updateYogaUI(result.jointScores);
+      }
+    }
+  },
   (connected, msg) => {
     connStatus.textContent = msg;
     connStatus.className = connected ? 'connected' : 'disconnected';

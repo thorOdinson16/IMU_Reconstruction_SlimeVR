@@ -26,6 +26,30 @@
         <button class="btn btn-walk" data-cmd="toggle-walk" title="Toggle walking mode">Walk: OFF</button>
         <button class="btn btn-record" data-cmd="toggle-record" title="Toggle recording (screen + CSV)">Record: OFF</button>
       </div>
+      <div id="yoga-panel">
+        <div class="yoga-header">
+          <span class="yoga-title">Yoga Trainer</span>
+          <label class="yoga-toggle"><input type="checkbox" id="yoga-enable"> Enable</label>
+        </div>
+        <div id="yoga-body" style="display:none">
+          <div class="yoga-row">
+            <span class="yoga-label">Pose</span>
+            <select id="yoga-pose-select"></select>
+          </div>
+          <div class="yoga-row">
+            <span class="yoga-label">Overall</span>
+            <span id="yoga-score" class="yoga-value">--</span>
+          </div>
+          <div class="yoga-row">
+            <span class="yoga-label">Hold</span>
+            <span id="yoga-hold" class="yoga-value">--</span>
+          </div>
+          <div class="yoga-row">
+            <span class="yoga-label">Status</span>
+            <span id="yoga-status" class="yoga-value">--</span>
+          </div>
+        </div>
+      </div>
       <div id="info">
         <p>Connect your sensors and ensure the SlimeVR server is running.</p>
         <p>WebSocket: <span id="ws-url">ws://localhost:21110</span></p>

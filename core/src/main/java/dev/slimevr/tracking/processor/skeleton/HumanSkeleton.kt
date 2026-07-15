@@ -785,9 +785,9 @@ class HumanSkeleton(
 
 			// Hip and hip tracker
 			getFirstAvailableTracker(hipTracker, waistTracker, chestTracker, upperChestTracker)?.let {
-				val yawRot = it.getRotation().project(POS_Y).unit()
-				hipBone.setRotation(yawRot)
-				hipTrackerBone.setRotation(yawRot)
+				val fullRot = it.getRotation()
+				hipBone.setRotation(fullRot)
+				hipTrackerBone.setRotation(fullRot)
 			}
 		} else if (headTracker != null) {
 			// Align with neck's yaw

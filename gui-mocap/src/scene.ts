@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
+import { JointScore } from './pose/types';
 
 // One Euro Filter (Casiez et al.): an adaptive low-pass filter that smooths noise
 // heavily when the signal is nearly static but relaxes toward zero lag as the signal
@@ -204,6 +205,10 @@ export class MocapScene {
   private bindPoseWorld = new Map<BodyPart, THREE.Quaternion>();
   private bindPoseLocal = new Map<BodyPart, THREE.Quaternion>();
   private bindHipLocalPosition = new THREE.Vector3();
+  private jointScores = new Map<BodyPart, JointScore>();
+  private poseOverlays = new Map<BodyPart, THREE.Mesh>();
+  private poseFeedbackVisible = false;
+
   private parentWorldInv = new THREE.Quaternion();
   private worldQuat = new THREE.Quaternion();
   private desiredWorld = new THREE.Quaternion();
@@ -509,6 +514,7 @@ if (this.mixamoScene) {
       }
 
       this.applyFootPlant(walkEnabled);
+      this.updatePoseFeedback();
   }
 
 private updateRootAndPelvis(
@@ -870,6 +876,94 @@ private updateRootAndPelvis(
           mesh.visible = true;
         }
       } else {
+        mesh.visible = false;
+      }
+    }
+  }
+
+  setJointScores(scores: JointScore[] | null) {
+    this.jointScores.clear();
+    this.poseFeedbackVisible = scores != null && scores.length > 0;
+    if (scores) {
+      for (const s of scores) {
+        this.jointScores.set(s.bodyPart, s);
+      }
+    }
+  }
+
+  private updatePoseFeedback() {
+    if (!this.poseFeedbackVisible || !this.mixamoScene) {
+      for (const [, mesh] of this.poseOverlays) {
+        mesh.visible = false;
+      }
+      return;
+    }
+
+    const overlayRadius = 0.025;
+    const lerpColor = (score: number): THREE.Color => {
+      const c = new THREE.Color();
+      if (score >= 0.8) {
+        c.setRGB(0, 0.8, 0);
+      } else if (score >= 0.5) {
+        const t = (score - 0.5) / 0.3;
+        c.setRGB(1 - t, 0.8, 0);
+      } else {
+        const t = score / 0.5;
+        c.setRGB(1, t * 0.8, 0);
+      }
+      return c;
+    };
+
+    const activeKeys = new Set<string>();
+    const p1 = new THREE.Vector3();
+    const p2 = new THREE.Vector3();
+    const mid = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    const yAxis = new THREE.Vector3(0, 1, 0);
+
+    for (const [childBp, parentBp] of Object.entries(BONE_PARENT)) {
+      const child = Number(childBp) as BodyPart;
+      const parent = parentBp as BodyPart;
+
+      const score = this.jointScores.get(child);
+      if (!score) continue;
+
+      const childBone = this.mixamoBones.get(child);
+      const parentBone = this.mixamoBones.get(parent);
+      if (!childBone || !parentBone) continue;
+
+      const key = `${child}`;
+      activeKeys.add(key);
+
+      let mesh = this.poseOverlays.get(child);
+      if (!mesh) {
+        const geo = new THREE.CylinderGeometry(overlayRadius, overlayRadius, 1, 6);
+        const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthTest: true, depthWrite: false });
+        mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 1;
+        this.scene.add(mesh);
+        this.poseOverlays.set(child, mesh);
+      }
+
+      childBone.getWorldPosition(p1);
+      parentBone.getWorldPosition(p2);
+      mid.addVectors(p1, p2).multiplyScalar(0.5);
+      dir.subVectors(p1, p2);
+      const len = dir.length();
+      if (len < 0.001) {
+        mesh.visible = false;
+        continue;
+      }
+
+      mesh.position.copy(mid);
+      mesh.scale.set(1, len, 1);
+      mesh.quaternion.setFromUnitVectors(yAxis, dir.normalize());
+      mesh.visible = true;
+      (mesh.material as THREE.MeshBasicMaterial).color.copy(lerpColor(score.score));
+    }
+
+    for (const [key, mesh] of this.poseOverlays) {
+      if (!activeKeys.has(key)) {
         mesh.visible = false;
       }
     }
