@@ -30,6 +30,11 @@ let recording = false;
 let runNumber = '';
 let mediaRecorder: MediaRecorder | null = null;
 const videoChunks: Blob[] = [];
+let pelvisCsvRows: string[] = [];
+let walkDebugRows: string[] = [];
+let lastPelvisPos: { x: number; y: number; z: number } | null = null;
+let pelvisChangedThisFrame = false;
+const PELVIS_EPSILON = 1e-5;
 let recStartTime = 0;
 let timerInterval: number | null = null;
 
@@ -105,6 +110,40 @@ scene.setPostRenderCallback(() => {
   drawLabels(offscreenCtx);
 });
 
+scene.setPelvisPositionCallback((pos, ts) => {
+  if (!recording) { pelvisChangedThisFrame = false; return; }
+  pelvisChangedThisFrame = false;
+  if (lastPelvisPos) {
+    const dx = pos.x - lastPelvisPos.x;
+    const dy = pos.y - lastPelvisPos.y;
+    const dz = pos.z - lastPelvisPos.z;
+    if (Math.abs(dx) < PELVIS_EPSILON && Math.abs(dy) < PELVIS_EPSILON && Math.abs(dz) < PELVIS_EPSILON) return;
+  }
+  lastPelvisPos = { x: pos.x, y: pos.y, z: pos.z };
+  pelvisChangedThisFrame = true;
+  pelvisCsvRows.push(`${ts},${pos.x},${pos.y},${pos.z}`);
+});
+
+scene.setWalkDebugCallback((data, ts) => {
+  if (!recording) return;
+  if (!pelvisChangedThisFrame) return;
+  walkDebugRows.push([
+    ts,
+    data.plantedFoot ?? '',
+    data.plantJustChanged ? 1 : 0,
+    data.leftContact ? 1 : 0,
+    data.rightContact ? 1 : 0,
+    data.contactCandidate ?? '',
+    data.contactCandidateFrames,
+    data.plantFrameCount,
+    data.leftFootX, data.leftFootY, data.leftFootZ,
+    data.rightFootX, data.rightFootY, data.rightFootZ,
+    data.anchorX, data.anchorY, data.anchorZ,
+    data.corrX, data.corrY, data.corrZ,
+    data.rootX, data.rootY, data.rootZ,
+  ].join(','));
+});
+
 const client = new ProtocolClient(
   WS_URL,
   (bones, syntheticTrackers, _index) => scene.update(bones, syntheticTrackers, walkEnabled),
@@ -151,6 +190,66 @@ function hideRecIndicator() {
   }
 }
 
+async function uploadPelvisCsv() {
+  if (pelvisCsvRows.length <= 1) return;
+  const csvText = pelvisCsvRows.join('\n');
+  const blob = new Blob([csvText], { type: 'text/csv' });
+  const safeRun = runNumber || Date.now().toString();
+  const fileName = `run_${safeRun}_pelvis.csv`;
+  let uploaded = false;
+
+  try {
+    await fetch(`http://${location.hostname}:21111/upload`, {
+      method: 'POST',
+      headers: { 'X-Filename': fileName },
+      body: blob,
+    });
+    console.log(`[Record] Uploaded ${fileName}`);
+    uploaded = true;
+  } catch (err) {
+    console.error('[Record] Pelvis CSV upload failed:', err);
+  }
+
+  if (!uploaded) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function uploadWalkDebugCsv() {
+  if (walkDebugRows.length <= 1) return;
+  const csvText = walkDebugRows.join('\n');
+  const blob = new Blob([csvText], { type: 'text/csv' });
+  const safeRun = runNumber || Date.now().toString();
+  const fileName = `run_${safeRun}_walk_debug.csv`;
+  let uploaded = false;
+
+  try {
+    await fetch(`http://${location.hostname}:21111/upload`, {
+      method: 'POST',
+      headers: { 'X-Filename': fileName },
+      body: blob,
+    });
+    console.log(`[Record] Uploaded ${fileName}`);
+    uploaded = true;
+  } catch (err) {
+    console.error('[Record] Walk debug CSV upload failed:', err);
+  }
+
+  if (!uploaded) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function startRecording() {
   ensureOffscreen();
   const stream = offscreen.captureStream(60);
@@ -164,6 +263,10 @@ async function startRecording() {
   }
 
   videoChunks.length = 0;
+  pelvisCsvRows = ['timestamp_ms,x,y,z'];
+  walkDebugRows = ['timestamp_ms,planted_foot,plant_changed,left_contact,right_contact,contact_candidate,contact_candidate_frames,plant_frame_count,left_foot_x,left_foot_y,left_foot_z,right_foot_x,right_foot_y,right_foot_z,anchor_x,anchor_y,anchor_z,correction_x,correction_y,correction_z,root_x,root_y,root_z'];
+  lastPelvisPos = null;
+  pelvisChangedThisFrame = false;
   mediaRecorder = new MediaRecorder(stream, { mimeType });
 
   mediaRecorder.ondataavailable = (e) => {
@@ -208,6 +311,8 @@ async function startRecording() {
 function stopRecording() {
   client.sendRecordStop();
   hideRecIndicator();
+  uploadPelvisCsv();
+  uploadWalkDebugCsv();
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }

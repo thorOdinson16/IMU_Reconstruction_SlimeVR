@@ -42,3 +42,4 @@ repomix-output.md
 *.log
 .env.local
 *.pdf
+*.txt

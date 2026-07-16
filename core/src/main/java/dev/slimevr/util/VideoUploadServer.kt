@@ -30,14 +30,13 @@ class VideoUploadServer(port: Int = 21111) {
             }
 
             val rawName = exchange.requestHeaders.getFirst("X-Filename") ?: "recording.webm"
-            val runNumber = rawName.removePrefix("run_").substringBeforeLast(".")
-            val extension = rawName.substringAfterLast(".", "webm")
+            val runNumber = rawName.removePrefix("run_").takeWhile { it.isDigit() }
 
             val runDir = File("RecordLogs/run_$runNumber")
             if (!runDir.exists()) runDir.mkdirs()
 
             val bytes = exchange.requestBody.readBytes()
-            val outFile = File(runDir, "run_${runNumber}.$extension")
+            val outFile = File(runDir, rawName)
             outFile.writeBytes(bytes)
 
             println("[VideoUpload] Saved ${bytes.size} bytes to ${outFile.absolutePath}")

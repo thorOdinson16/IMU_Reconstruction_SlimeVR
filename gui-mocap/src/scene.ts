@@ -2,6 +2,21 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
 
+export interface WalkDebugFrame {
+  plantedFoot: number | null;
+  plantJustChanged: boolean;
+  leftContact: boolean;
+  rightContact: boolean;
+  contactCandidate: number | null;
+  contactCandidateFrames: number;
+  plantFrameCount: number;
+  leftFootX: number; leftFootY: number; leftFootZ: number;
+  rightFootX: number; rightFootY: number; rightFootZ: number;
+  anchorX: number; anchorY: number; anchorZ: number;
+  corrX: number; corrY: number; corrZ: number;
+  rootX: number; rootY: number; rootZ: number;
+}
+
 // One Euro Filter (Casiez et al.): an adaptive low-pass filter that smooths noise
 // heavily when the signal is nearly static but relaxes toward zero lag as the signal
 // starts moving quickly -- exactly the "filter noise without adding latency" behavior
@@ -81,11 +96,10 @@ const BONE_RADIUS = 0.02;
 const JOINT_RADIUS = 0.03;
 const FOOT_CONTACT_HEIGHT = 0.08;      // m above the floor plane that still counts as contact
 const FOOT_CONTACT_SPEED = 0.5;        // m/s; a foot slower than this near the floor is "planted"
-const CONTACT_DEBOUNCE_FRAMES = 3;     // frames a contact change must persist before it is trusted
+const CONTACT_DEBOUNCE_FRAMES = 8;     // frames a contact change must persist before it is trusted
 const STATIONARY_ENTER_SPEED = 0.06;   // m/s hip speed below which the body is treated as still
 const STATIONARY_EXIT_SPEED = 0.12;    // m/s hip speed above which the body starts translating
 const MAX_ROOT_STEP = 0.4;             // m/frame safety clamp; only catches glitch frames
-const PLANT_SMOOTH_H = 0.35;           // horizontal plant correction blended per frame (jitter vs slide)
 const PLANT_SMOOTH_V = 1.0;            // vertical plant correction applied in full (no squat lag)
 const EURO_MIN_CUTOFF = 1.2;           // Hz; lower = smoother when still
 const EURO_BETA = 0.7;                 // higher = less latency while moving
@@ -188,6 +202,9 @@ export class MocapScene {
   private renderer: THREE.WebGLRenderer;
   private animFrameId = 0;
   private postRenderCallback: (() => void) | null = null;
+  private pelvisPositionCallback: ((pos: THREE.Vector3, timestamp: number) => void) | null = null;
+  private _walkDebugSnapshot: WalkDebugFrame | null = null;
+  private walkDebugCallback: ((data: WalkDebugFrame, timestamp: number) => void) | null = null;
 
   private nodes = new Map<BodyPart, { mesh: THREE.Mesh; joint: THREE.Mesh }>();
   private boneLines = new Map<string, THREE.Mesh>();
@@ -233,6 +250,7 @@ export class MocapScene {
   private stationaryLockZ = 0;
   private walkActive = false;
   private plantJustChanged = false;
+  private plantFrameCount = 0;
   private leftContact = false;
   private rightContact = false;
   private currentFilterCutoff = EURO_MIN_CUTOFF;
@@ -241,7 +259,6 @@ export class MocapScene {
   private _lFootWorld = new THREE.Vector3();
   private _rFootWorld = new THREE.Vector3();
   private _plantCorr = new THREE.Vector3();
-  private _plantTarget = new THREE.Vector3();
   private hipFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
   private leftFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
   private rightFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
@@ -431,6 +448,19 @@ export class MocapScene {
     } else {
       this.updateStickFigure(bones);
     }
+
+    if (this.mixamoLoaded && this.pelvisPositionCallback) {
+      const hipBone = this.mixamoBones.get(BodyPart.HIP);
+      if (hipBone) {
+        const pos = hipBone.getWorldPosition(new THREE.Vector3());
+        this.pelvisPositionCallback(pos, performance.now());
+      }
+    }
+
+    if (this.walkDebugCallback && this._walkDebugSnapshot) {
+      this.walkDebugCallback(this._walkDebugSnapshot, performance.now());
+      this._walkDebugSnapshot = null;
+    }
   }
 
   private applyMixamoPose(bones: BoneT[], syntheticTrackers: TrackerDataT[], walkEnabled: boolean) {
@@ -586,6 +616,7 @@ private updateRootAndPelvis(
     this.stationaryLockX = 0;
     this.stationaryLockZ = 0;
     this.plantJustChanged = false;
+    this.plantFrameCount = 0;
     this.floorCaptured = false;
     this.previousLeftFoot = leftFoot.clone();
     this.previousRightFoot = rightFoot.clone();
@@ -648,19 +679,27 @@ private updateRootAndPelvis(
       this.contactCandidate = null;
       this.contactCandidateFrames = 0;
     } else if (best != null) {
-      const firstPlant = this.plantedFoot == null;
-      if (this.contactCandidate === best) {
-        this.contactCandidateFrames++;
-      } else {
-        this.contactCandidate = best;
-        this.contactCandidateFrames = 1;
-      }
-      if (firstPlant || this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
-        this.plantedFoot = best;
+      // Same foot regained contact after a transient sensor dropout —
+      // re-ground immediately. Only debounce when switching feet.
+      if (best === this.plantedFoot && plantedContact) {
         this.plantedGrounded = true;
-        this.plantJustChanged = true; // applyFootPlant() re-anchors to the posed foot
         this.contactCandidate = null;
         this.contactCandidateFrames = 0;
+      } else {
+        const firstPlant = this.plantedFoot == null;
+        if (this.contactCandidate === best) {
+          this.contactCandidateFrames++;
+        } else {
+          this.contactCandidate = best;
+          this.contactCandidateFrames = 1;
+        }
+        if (firstPlant || this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
+          this.plantedFoot = best;
+          this.plantedGrounded = true;
+          this.plantJustChanged = true; // applyFootPlant() re-anchors to the posed foot
+          this.contactCandidate = null;
+          this.contactCandidateFrames = 0;
+        }
       }
     } else {
       this.contactCandidate = null;
@@ -711,34 +750,60 @@ private updateRootAndPelvis(
     // of the contact/plant boolean. The body then follows the legs down with zero lag,
     // even on a fast sit where the debounced contact momentarily drops out (which used
     // to leave the feet floating until it snapped down).
-    const corrY = this.floorYModel - Math.min(lw.y, rw.y);
+    let corrY = this.floorYModel - Math.min(lw.y, rw.y);
 
-    // HORIZONTAL (issue 2): foot-lock the debounced planted foot to a fixed anchor. With
-    // no valid plant we hold x/z (correction 0) so nothing slides.
+    // HORIZONTAL: foot-lock the debounced planted foot to a fixed anchor.
+    // Correction is derived from an EMA-filtered model-space foot position
+    // (root-independent, pure leg FK) so that sensor rotation noise does not
+    // produce a random walk in the root. With no valid plant we hold x/z
+    // (correction 0) so nothing slides.
     let corrX = 0;
     let corrZ = 0;
-    if (this.plantedFoot != null && this.plantedGrounded) {
+    const plantJustChangedThisFrame = this.plantJustChanged;
+    if (this.plantedFoot != null) {
       const fw = this.plantedFoot === BodyPart.LEFT_FOOT ? lw : rw;
-      if (this.plantJustChanged) {
+      if (plantJustChangedThisFrame) {
         this.anchor.set(fw.x, this.floorYModel, fw.z);
         this.plantJustChanged = false;
+        this.plantFrameCount = 0;
       }
       corrX = this.anchor.x - fw.x;
       corrZ = this.anchor.z - fw.z;
+      this.plantFrameCount++;
     }
 
-    this._plantCorr.set(corrX, corrY, corrZ);
-    const d = this._plantCorr.length();
-    if (d > MAX_ROOT_STEP) this._plantCorr.multiplyScalar(MAX_ROOT_STEP / d); // glitch guard
+    const hClamp = Math.hypot(corrX, corrZ);
+    if (hClamp > MAX_ROOT_STEP) {
+      const s = MAX_ROOT_STEP / hClamp;
+      corrX *= s;
+      corrZ *= s;
+    }
+    corrY = Math.max(-MAX_ROOT_STEP, Math.min(MAX_ROOT_STEP, corrY));
 
-    // Blend the correction in: horizontal is smoothed to absorb foot-bone rotation noise
-    // (kills the sitting jitter); vertical is applied in full so squats stay snappy.
-    this._plantTarget.copy(this.mixamoScene.position).add(this._plantCorr);
+    this._plantCorr.set(corrX, corrY, corrZ);
+
     const p = this.mixamoScene.position;
-    p.x += (this._plantTarget.x - p.x) * PLANT_SMOOTH_H;
-    p.y += (this._plantTarget.y - p.y) * PLANT_SMOOTH_V;
-    p.z += (this._plantTarget.z - p.z) * PLANT_SMOOTH_H;
+    p.x += this._plantCorr.x;
+    p.z += this._plantCorr.z;
+    p.y += this._plantCorr.y;
     this.mixamoScene.updateMatrixWorld(true);
+
+    this._walkDebugSnapshot = {
+      plantedFoot: this.plantedFoot ?? null,
+      plantJustChanged: plantJustChangedThisFrame,
+      leftContact: this.leftContact,
+      rightContact: this.rightContact,
+      contactCandidate: this.contactCandidate ?? null,
+      contactCandidateFrames: this.contactCandidateFrames,
+      plantFrameCount: this.plantFrameCount,
+      leftFootX: lw.x, leftFootY: lw.y, leftFootZ: lw.z,
+      rightFootX: rw.x, rightFootY: rw.y, rightFootZ: rw.z,
+      anchorX: this.anchor.x, anchorY: this.anchor.y, anchorZ: this.anchor.z,
+      corrX: this._plantCorr.x, corrY: this._plantCorr.y, corrZ: this._plantCorr.z,
+      rootX: this.mixamoScene.position.x,
+      rootY: this.mixamoScene.position.y,
+      rootZ: this.mixamoScene.position.z,
+    };
   }
 
   private getBonePosition(dataByPart: Map<BodyPart, BoneT>, bodyPart: BodyPart): THREE.Vector3 | null {
@@ -888,6 +953,14 @@ private updateRootAndPelvis(
 
   setPostRenderCallback(cb: (() => void) | null) {
     this.postRenderCallback = cb;
+  }
+
+  setPelvisPositionCallback(cb: ((pos: THREE.Vector3, timestamp: number) => void) | null) {
+    this.pelvisPositionCallback = cb;
+  }
+
+  setWalkDebugCallback(cb: ((data: WalkDebugFrame, timestamp: number) => void) | null) {
+    this.walkDebugCallback = cb;
   }
 
   stop() {
