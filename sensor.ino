@@ -9,10 +9,10 @@
 // PER-BOARD CONFIG — only these two lines change across the 10 sensors.
 //
 //   L_FA, L_UA, R_FA, R_UA  ->  HUB_MAC = CHEST  (E8:3D:C1:9C:50:14)
-//   L_SH, L_TH, R_SH, R_TH  ->  HUB_MAC = HIPS   (A4:CB:8F:1E:A5:B8)
+//   L_SH, L_TH, R_SH, R_TH  ->  HUB_MAC = HIPS   (A4:CB:8F:1D:65:C0)
 // ============================================================
-const char* SENSOR_LABEL = "L_FA";
-uint8_t HUB_MAC[] = {0xE8, 0x3D, 0xC1, 0x9C, 0x50, 0x14};   // CHEST
+const char* SENSOR_LABEL = "L_SH";
+uint8_t HUB_MAC[] = {0xA4, 0xCB, 0x8F, 0x1D, 0x65, 0xC0};   // HIPS
 // ============================================================
 
 const int LED_RED   = 1;
@@ -184,7 +184,9 @@ void loop() {
     hbOn = false;
   }
 
-  if (now - lastSend < 15) return;
+  // Send-gate tightened from 15ms -> 10ms (100Hz) to shrink the window
+  // between a fresh DMP quaternion and it going out over ESP-NOW.
+  if (now - lastSend < 10) return;
   lastSend = now;
 
   // Drain the FIFO and keep only the most recent quaternion, instead of

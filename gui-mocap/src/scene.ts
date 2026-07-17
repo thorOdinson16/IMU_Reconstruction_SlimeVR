@@ -96,7 +96,7 @@ const BONE_RADIUS = 0.02;
 const JOINT_RADIUS = 0.03;
 const FOOT_CONTACT_HEIGHT = 0.08;      // m above the floor plane that still counts as contact
 const FOOT_CONTACT_SPEED = 0.5;        // m/s; a foot slower than this near the floor is "planted"
-const CONTACT_DEBOUNCE_FRAMES = 8;     // frames a contact change must persist before it is trusted
+const CONTACT_DEBOUNCE_FRAMES = 3;     // frames a contact change must persist before it is trusted
 const STATIONARY_ENTER_SPEED = 0.06;   // m/s hip speed below which the body is treated as still
 const STATIONARY_EXIT_SPEED = 0.12;    // m/s hip speed above which the body starts translating
 const MAX_ROOT_STEP = 0.4;             // m/frame safety clamp; only catches glitch frames
@@ -760,7 +760,7 @@ private updateRootAndPelvis(
     let corrX = 0;
     let corrZ = 0;
     const plantJustChangedThisFrame = this.plantJustChanged;
-    if (this.plantedFoot != null) {
+    if (this.plantedFoot != null && this.plantedGrounded) {
       const fw = this.plantedFoot === BodyPart.LEFT_FOOT ? lw : rw;
       if (plantJustChangedThisFrame) {
         this.anchor.set(fw.x, this.floorYModel, fw.z);

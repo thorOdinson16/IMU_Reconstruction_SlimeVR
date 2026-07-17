@@ -6,12 +6,11 @@
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps612.h"
 
-const char* SELF_LABEL = "CHEST"; // HIPS
+const char* SELF_LABEL = "HIPS"; // HIPS
 const char* ssid       = "TP-Link_DF6C_Cave";
 const char* password   = "Caveiot@123";
 
 const char* server_ip1 = "192.168.1.217"; // "192.168.0.104"
-const char* server_ip2 = "192.168.1.159"; // "192.168.0.103"
 const unsigned int port   = 5005;
 
 const int LED_RED   = 1;
@@ -84,10 +83,6 @@ void forwardPacket(const char* label, float qw, float qx, float qy, float qz) {
   udp.beginPacket(server_ip1, port);
   udp.print(payload);
   udp.endPacket();
-
-  udp.beginPacket(server_ip2, port);
-  udp.print(payload);
-  udp.endPacket();
 }
 
 void connectWiFi() {
@@ -107,7 +102,6 @@ void connectWiFi() {
   Serial.println(WiFi.localIP());
   Serial.print("Sending to server IP: ");
   Serial.println(server_ip1);
-  Serial.println(server_ip2);
 }
 
 void setup() {
@@ -199,7 +193,10 @@ void loop() {
     hbOn = false;
   }
 
-  if (now - lastOwnSend >= 15) {
+  // Send-gate tightened from 15ms -> 10ms (100Hz) so freshly drained
+  // quaternions sit for less time before being forwarded. Matches the
+  // limb sensors' own send interval.
+  if (now - lastOwnSend >= 10) {
     lastOwnSend = now;
     // Drain the FIFO and keep only the most recent quaternion, instead of
     // reading a single packet per loop.
@@ -239,5 +236,8 @@ void loop() {
     forwardPacket(readBuf[i].label, readBuf[i].qw, readBuf[i].qx, readBuf[i].qy, readBuf[i].qz);
   }
 
-  delay(1);
+  // Trailing delay(1) removed — nothing in this loop needs a cooldown.
+  // ESP-NOW receive is interrupt-driven and the FIFO checks are cheap,
+  // so this was capping the whole loop at ~1000Hz for no reason, adding
+  // up to 1ms of pure dead time to every relayed limb packet.
 }
