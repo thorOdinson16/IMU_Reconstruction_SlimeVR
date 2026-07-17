@@ -64,6 +64,7 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 	fun setEnabled(enabled: Boolean) {
 		this.enabled = enabled
 		legTweaks.setLocalizerMode(enabled)
+		if (enabled) reset()
 	}
 
 	fun update() {
@@ -84,6 +85,9 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 			targetFoot = Vector3.NULL
 		}
 		warmupFrames++
+		if (warmupFrames >= WARMUP_FRAMES && targetFoot == Vector3.NULL) {
+			plantedFoot = MovementStates.NONE_LOCKED
+		}
 
 		// set the buffers for easy access
 		bufCur = legTweaks.bufferHead
@@ -108,6 +112,14 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 		// update the final travel vector
 		if (worldReference == MovementStates.FOLLOW_FOOT || warmupFrames < WARMUP_FRAMES) {
 			finalTravel = footTravel
+			if (worldReference == MovementStates.FOLLOW_FOOT && warmupFrames >= WARMUP_FRAMES) {
+				val walkDrive = comVelocity / bufCur.getTimeDelta() * 0.5f
+				finalTravel = Vector3(
+					finalTravel.x + walkDrive.x,
+					finalTravel.y,
+					finalTravel.z + walkDrive.z,
+				)
+			}
 		} else if (worldReference == MovementStates.FOLLOW_COM) {
 			finalTravel = comTravel
 		} else if (worldReference == MovementStates.FOLLOW_SITTING) {
@@ -119,14 +131,12 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 			finalTravel = Vector3.NULL
 		}
 
-		// update the y value
-		if (worldReference != MovementStates.FOLLOW_SITTING || sittingFrames < SITTING_EARLY) {
-			finalTravel = Vector3(
-				finalTravel.x,
-				comTravel.y,
-				finalTravel.z,
-			)
-		}
+		// always use comTravel.y for smooth vertical movement
+		finalTravel = Vector3(
+			finalTravel.x,
+			comTravel.y,
+			finalTravel.z,
+		)
 
 		updateSkeletonPos(finalTravel)
 	}

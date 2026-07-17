@@ -77,6 +77,14 @@ public class WebsocketAPI extends WebSocketServer implements ProtocolAPIServer {
 
 	@Override
 	public void onMessage(WebSocket conn, String message) {
+		if ("RECORD:START".equals(message)) {
+			String runNumber = server.startCsvRecording();
+			conn.send("RUN:NUMBER:" + runNumber);
+		} else if ("RECORD:STOP".equals(message)) {
+			server.stopCsvRecording();
+		} else if (message.startsWith("CSV_EVENT:")) {
+			server.markCsvEvent(message.substring(10));
+		}
 	}
 
 	@Override

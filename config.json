@@ -37,7 +37,8 @@ autoBone:
   useFrameFiltering: false
   maxFinalError: 0.03
 skeleton:
-  toggles: {}
+  toggles:
+    selfLocalization: true
   values: {}
   offsets:
     hipLength: 0.04

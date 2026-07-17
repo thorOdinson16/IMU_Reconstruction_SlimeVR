@@ -17,27 +17,44 @@ import {
   TrackerDataMaskT,
   DeviceDataMaskT,
   DataFeedMessage,
+  TrackerDataT,
+  ChangeSettingsRequestT,
+  ModelSettingsT,
+  ModelTogglesT,
 } from 'solarxr-protocol';
 
-type BoneCallback = (bones: BoneT[], index: number) => void;
+type BoneCallback = (bones: BoneT[], syntheticTrackers: TrackerDataT[], index: number) => void;
+type TextCallback = (msg: string) => void;
+type StatusCallback = (connected: boolean, msg: string) => void;
+type TrackerCountCallback = (count: number) => void;
 
 export class ProtocolClient {
   private ws: WebSocket | null = null;
   private url: string;
   private onBones: BoneCallback;
-  private onStatus: (connected: boolean, msg: string) => void;
-  private onTrackerCount: (count: number) => void;
+  private onStatus: StatusCallback;
+  private onTrackerCount: TrackerCountCallback;
+  private onText: TextCallback | null = null;
 
   constructor(
     url: string,
     onBones: BoneCallback,
-    onStatus: (connected: boolean, msg: string) => void,
-    onTrackerCount: (count: number) => void,
+    onStatus: StatusCallback,
+    onTrackerCount: TrackerCountCallback,
   ) {
     this.url = url;
     this.onBones = onBones;
     this.onStatus = onStatus;
     this.onTrackerCount = onTrackerCount;
+  }
+
+  setTextCallback(cb: TextCallback) {
+    this.onText = cb;
+  }
+
+  sendText(msg: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(msg);
   }
 
   connect() {
@@ -63,6 +80,8 @@ export class ProtocolClient {
     this.ws.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
         this.handleMessage(new Uint8Array(ev.data));
+      } else if (typeof ev.data === 'string') {
+        if (this.onText) this.onText(ev.data);
       }
     };
   }
@@ -77,7 +96,7 @@ export class ProtocolClient {
         if (hdr.messageType === DataFeedMessage.DataFeedUpdate) {
           const update = hdr.message as DataFeedUpdateT;
           if (update.bones) {
-            this.onBones(update.bones, update.index);
+            this.onBones(update.bones, update.syntheticTrackers ?? [], update.index);
             this.onTrackerCount(update.bones.length);
           }
         }
@@ -166,10 +185,46 @@ export class ProtocolClient {
     this.send(bundle);
   }
 
+  sendToggleWalk(_enabled: boolean) {
+    // Walk Mode is handled entirely client-side (see MocapScene's foot-lock root
+    // solver). We deliberately keep the server's self-localization OFF so the
+    // server stays floor-clipped and produces a clean, non-drifting relative pose
+    // that the client can lock feet against. Enabling it disables the server
+    // floor-clip and injects an odometry drift that fights the client solver.
+    const toggles = new ModelTogglesT();
+    toggles.selfLocalization = false;
+
+    const modelSettings = new ModelSettingsT();
+    modelSettings.toggles = toggles;
+
+    const bundle = new MessageBundleT();
+    const hdr = new RpcMessageHeaderT();
+    hdr.messageType = RpcMessage.ChangeSettingsRequest;
+    hdr.message = new ChangeSettingsRequestT(
+      null, null, null, null, null, null,
+      modelSettings,
+      null, null, null, null, null, null, null, null,
+    );
+    bundle.rpcMsgs = [hdr];
+    this.send(bundle);
+  }
+
   disconnect() {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
+  }
+
+  sendRecordStart() {
+    this.sendText('RECORD:START');
+  }
+
+  sendRecordStop() {
+    this.sendText('RECORD:STOP');
+  }
+
+  sendCsvEvent(label: string) {
+    this.sendText('CSV_EVENT:' + label);
   }
 }

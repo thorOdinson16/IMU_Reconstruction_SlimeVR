@@ -1,9 +1,109 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { BoneT, BodyPart } from 'solarxr-protocol';
+import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
+
+export interface WalkDebugFrame {
+  plantedFoot: number | null;
+  plantJustChanged: boolean;
+  leftContact: boolean;
+  rightContact: boolean;
+  contactCandidate: number | null;
+  contactCandidateFrames: number;
+  plantFrameCount: number;
+  leftFootX: number; leftFootY: number; leftFootZ: number;
+  rightFootX: number; rightFootY: number; rightFootZ: number;
+  anchorX: number; anchorY: number; anchorZ: number;
+  corrX: number; corrY: number; corrZ: number;
+  rootX: number; rootY: number; rootZ: number;
+}
+
+// One Euro Filter (Casiez et al.): an adaptive low-pass filter that smooths noise
+// heavily when the signal is nearly static but relaxes toward zero lag as the signal
+// starts moving quickly -- exactly the "filter noise without adding latency" behavior
+// walk-mode locomotion needs, since the same signal is static while standing and fast
+// while stepping.
+class OneEuroFilterScalar {
+  private xPrev: number | null = null;
+  private dxPrev = 0;
+
+  constructor(private minCutoff: number, private beta: number, private dCutoff: number) {}
+
+  setMinCutoff(cutoff: number) {
+    this.minCutoff = cutoff;
+  }
+
+  private alpha(cutoff: number, dt: number): number {
+    const tau = 1 / (2 * Math.PI * cutoff);
+    return 1 / (1 + tau / dt);
+  }
+
+  reset(x: number) {
+    this.xPrev = x;
+    this.dxPrev = 0;
+  }
+
+  filter(x: number, dt: number): number {
+    if (this.xPrev == null) {
+      this.xPrev = x;
+      return x;
+    }
+    const dx = (x - this.xPrev) / dt;
+    const aD = this.alpha(this.dCutoff, dt);
+    this.dxPrev = aD * dx + (1 - aD) * this.dxPrev;
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dxPrev);
+    const a = this.alpha(cutoff, dt);
+    const xFiltered = a * x + (1 - a) * this.xPrev;
+    this.xPrev = xFiltered;
+    return xFiltered;
+  }
+}
+
+class OneEuroFilterVector3 {
+  private fx: OneEuroFilterScalar;
+  private fy: OneEuroFilterScalar;
+  private fz: OneEuroFilterScalar;
+  private out = new THREE.Vector3();
+
+  constructor(minCutoff: number, beta: number, dCutoff: number) {
+    this.fx = new OneEuroFilterScalar(minCutoff, beta, dCutoff);
+    this.fy = new OneEuroFilterScalar(minCutoff, beta, dCutoff);
+    this.fz = new OneEuroFilterScalar(minCutoff, beta, dCutoff);
+  }
+
+  reset(v: THREE.Vector3) {
+    this.fx.reset(v.x);
+    this.fy.reset(v.y);
+    this.fz.reset(v.z);
+  }
+
+  setMinCutoff(cutoff: number) {
+    this.fx.setMinCutoff(cutoff);
+    this.fy.setMinCutoff(cutoff);
+    this.fz.setMinCutoff(cutoff);
+  }
+
+  filter(v: THREE.Vector3, dt: number): THREE.Vector3 {
+    this.out.set(
+      this.fx.filter(v.x, dt),
+      this.fy.filter(v.y, dt),
+      this.fz.filter(v.z, dt),
+    );
+    return this.out;
+  }
+}
 
 const BONE_RADIUS = 0.02;
 const JOINT_RADIUS = 0.03;
+const FOOT_CONTACT_HEIGHT = 0.08;      // m above the floor plane that still counts as contact
+const FOOT_CONTACT_SPEED = 0.5;        // m/s; a foot slower than this near the floor is "planted"
+const CONTACT_DEBOUNCE_FRAMES = 3;     // frames a contact change must persist before it is trusted
+const STATIONARY_ENTER_SPEED = 0.06;   // m/s hip speed below which the body is treated as still
+const STATIONARY_EXIT_SPEED = 0.12;    // m/s hip speed above which the body starts translating
+const MAX_ROOT_STEP = 0.4;             // m/frame safety clamp; only catches glitch frames
+const PLANT_SMOOTH_V = 1.0;            // vertical plant correction applied in full (no squat lag)
+const EURO_MIN_CUTOFF = 1.2;           // Hz; lower = smoother when still
+const EURO_BETA = 0.7;                 // higher = less latency while moving
+const EURO_D_CUTOFF = 1.0;             // Hz; derivative cutoff
 
 const BONE_PARENT: Partial<Record<BodyPart, BodyPart>> = {
   [BodyPart.HEAD]: BodyPart.NECK,
@@ -101,6 +201,10 @@ export class MocapScene {
   private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
   private animFrameId = 0;
+  private postRenderCallback: (() => void) | null = null;
+  private pelvisPositionCallback: ((pos: THREE.Vector3, timestamp: number) => void) | null = null;
+  private _walkDebugSnapshot: WalkDebugFrame | null = null;
+  private walkDebugCallback: ((data: WalkDebugFrame, timestamp: number) => void) | null = null;
 
   private nodes = new Map<BodyPart, { mesh: THREE.Mesh; joint: THREE.Mesh }>();
   private boneLines = new Map<string, THREE.Mesh>();
@@ -116,14 +220,57 @@ export class MocapScene {
   // model in its natural default pose.
   private bindPoseWorld = new Map<BodyPart, THREE.Quaternion>();
   private bindPoseLocal = new Map<BodyPart, THREE.Quaternion>();
+  private bindHipLocalPosition = new THREE.Vector3();
   private parentWorldInv = new THREE.Quaternion();
   private worldQuat = new THREE.Quaternion();
   private desiredWorld = new THREE.Quaternion();
 
+  private poseCalibrated = false;
+  private calibratedHip = new THREE.Vector3();
+  private floorY = 0;
+  // Foot-lock locomotion state (walk mode). Everything is in server/world space; the
+  // model is translated by (hipWorldTarget - calibratedHip) so the calibration pose
+  // maps to the origin. The relative geometry (foot - hip) used below is invariant to
+  // any global drift the server might apply, which is why it is robust.
+  private hipWorldTarget = new THREE.Vector3(); // desired hip world position this frame
+  private anchor = new THREE.Vector3();          // locked world position of the planted foot
+  private appliedRoot = new THREE.Vector3();     // last root translation actually applied
+  private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private plantedGrounded = false;
+  // A contact-state change must persist this many frames before we trust it and
+  // re-anchor -- this is what tells intentional weight transfer apart from one noisy
+  // frame, so standing still can't slowly random-walk the root away from center.
+  private contactCandidate: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private contactCandidateFrames = 0;
+  // Horizontal-only stationary lock: while hip speed stays below the enter threshold the
+  // root's x/z are pinned to wherever they were when we went stationary, so sensor noise
+  // cannot accumulate into drift. Vertical (squat/sit) is never gated by this.
+  private stationary = false;
+  private stationaryLockX = 0;
+  private stationaryLockZ = 0;
+  private walkActive = false;
+  private plantJustChanged = false;
+  private plantFrameCount = 0;
+  private leftContact = false;
+  private rightContact = false;
+  private currentFilterCutoff = EURO_MIN_CUTOFF;
+  private floorYModel = 0;
+  private floorCaptured = false;
+  private _lFootWorld = new THREE.Vector3();
+  private _rFootWorld = new THREE.Vector3();
+  private _plantCorr = new THREE.Vector3();
+  private hipFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private leftFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private rightFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private previousLeftFoot: THREE.Vector3 | null = null;
+  private previousRightFoot: THREE.Vector3 | null = null;
+  private previousHip: THREE.Vector3 | null = null;
+  private lastPoseTime = performance.now();
+
   constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void) {
     this.onModelStatus = onModelStatus ?? null;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(canvas.parentElement!.clientWidth, canvas.parentElement!.clientHeight);
     this.renderer.shadowMap.enabled = true;
@@ -145,23 +292,31 @@ export class MocapScene {
   }
 
   private setupLights() {
+    // 1. Ambient Light: Base level of light everywhere
     const ambient = new THREE.AmbientLight(0x404060, 0.6);
     this.scene.add(ambient);
 
-    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
-    dir.position.set(5, 10, 7);
-    dir.castShadow = true;
-    dir.shadow.mapSize.width = 1024;
-    dir.shadow.mapSize.height = 1024;
-    this.scene.add(dir);
+    // 2. Key Light: Your main, bright front light (Creates the primary shadows)
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    keyLight.position.set(5, 10, 7);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.width = 1024;
+    keyLight.shadow.mapSize.height = 1024;
+    this.scene.add(keyLight);
 
-    const fill = new THREE.DirectionalLight(0x4488ff, 0.3);
-    fill.position.set(-3, 1, -4);
-    this.scene.add(fill);
+    // 3. Fill Light: Softens the shadows on the front/side
+    const fillLight = new THREE.DirectionalLight(0x4488ff, 0.4);
+    fillLight.position.set(-5, 3, 5); 
+    this.scene.add(fillLight);
+
+    // 4. NEW - Back Light: Illuminates the back of the model
+    const backLight = new THREE.DirectionalLight(0xffffff, 0.9); // Adjust intensity here (0.5 to 1.0 is usually good)
+    backLight.position.set(0, 6, -10); // Placed behind (negative Z) and slightly elevated
+    this.scene.add(backLight);
   }
 
   private setupGround() {
-      const grid = new THREE.GridHelper(8, 16, 0x000000, 0x888888);
+      const grid = new THREE.GridHelper(10, 20, 0x000000, 0x888888);
       this.scene.add(grid);
   }
 
@@ -174,10 +329,11 @@ export class MocapScene {
     let radius = 3.5;
 
     const updateCam = () => {
+      const targetHeight = 0.9; 
       this.camera.position.x = radius * Math.sin(phi) * Math.sin(theta);
-      this.camera.position.y = radius * Math.cos(phi) - 0.3;
+      this.camera.position.y = radius * Math.cos(phi) + targetHeight; 
       this.camera.position.z = radius * Math.sin(phi) * Math.cos(theta);
-      this.camera.lookAt(0, -0.3, 0);
+      this.camera.lookAt(0, targetHeight, 0); 
     };
 
     this.renderer.domElement.addEventListener('pointerdown', (e) => {
@@ -199,7 +355,7 @@ export class MocapScene {
     this.renderer.domElement.addEventListener(
       'wheel',
       (e) => {
-        radius = Math.max(1.2, Math.min(8, radius + e.deltaY * 0.005));
+        radius = Math.max(1.2, Math.min(10, radius + e.deltaY * 0.005));
         updateCam();
       },
       { passive: true },
@@ -253,6 +409,11 @@ export class MocapScene {
       this.scene.add(model);
       this.mixamoScene = model;
 
+      const rootBone = this.mixamoBones.get(BodyPart.HIP);
+      if (rootBone) {
+        this.bindHipLocalPosition.copy(rootBone.position);
+      }
+
       // Compute bind-pose world rotations
       this.mixamoScene.updateMatrixWorld(true);
       for (const [bp, bone] of this.mixamoBones) {
@@ -267,26 +428,50 @@ export class MocapScene {
     }
   }
 
-  update(bones: BoneT[]) {
+  /**
+   * Recenters walk-mode locomotion. Call this whenever the server's reference frame is
+   * reset (Reset Full/Yaw/Mounting) -- those change the frame the raw tracker positions
+   * are expressed in, so the client's calibration/anchor state must resync or the root
+   * will drift or fail to recenter.
+   */
+  resetLocomotion() {
+    this.poseCalibrated = false;
+    this.walkActive = false;
+    this.floorCaptured = false;
+    this.plantJustChanged = false;
+  }
+
+  update(bones: BoneT[], syntheticTrackers: TrackerDataT[] = [], walkEnabled = false) {
     if (this.mixamoLoaded) {
-      this.applyMixamoPose(bones);
+      this.applyMixamoPose(bones, syntheticTrackers, walkEnabled);
       this.hideStickFigure();
     } else {
       this.updateStickFigure(bones);
     }
+
+    if (this.mixamoLoaded && this.pelvisPositionCallback) {
+      const hipBone = this.mixamoBones.get(BodyPart.HIP);
+      if (hipBone) {
+        const pos = hipBone.getWorldPosition(new THREE.Vector3());
+        this.pelvisPositionCallback(pos, performance.now());
+      }
+    }
+
+    if (this.walkDebugCallback && this._walkDebugSnapshot) {
+      this.walkDebugCallback(this._walkDebugSnapshot, performance.now());
+      this._walkDebugSnapshot = null;
+    }
   }
 
-  private applyMixamoPose(bones: BoneT[]) {
+  private applyMixamoPose(bones: BoneT[], syntheticTrackers: TrackerDataT[], walkEnabled: boolean) {
       const rootBone = this.mixamoBones.get(BodyPart.HIP);
       if (!rootBone) return;
 
       const dataByPart = new Map<BodyPart, BoneT>();
       for (const b of bones) dataByPart.set(b.bodyPart, b);
+      const trackerByPart = this.getSyntheticTrackerPositions(syntheticTrackers);
 
-      const rootData = dataByPart.get(BodyPart.HIP);
-      if (rootData && rootData.headPositionG) {
-        rootBone.position.set(rootData.headPositionG.x, rootData.headPositionG.y, rootData.headPositionG.z);
-      }
+      this.updateRootAndPelvis(dataByPart, trackerByPart, walkEnabled, rootBone);
 
       const order: BodyPart[] = [
         BodyPart.HIP,
@@ -349,9 +534,300 @@ export class MocapScene {
         mixamoBone.updateMatrixWorld(true);
       }
 
-      if (this.mixamoScene) {
+if (this.mixamoScene) {
         this.mixamoScene.updateMatrixWorld(true);
       }
+
+      this.applyFootPlant(walkEnabled);
+  }
+
+private updateRootAndPelvis(
+    dataByPart: Map<BodyPart, BoneT>,
+    trackerByPart: Map<BodyPart, THREE.Vector3>,
+    walkEnabled: boolean,
+    rootBone: THREE.Bone,
+  ) {
+    const hip = trackerByPart.get(BodyPart.HIP) ?? this.getBonePosition(dataByPart, BodyPart.HIP);
+    const leftFoot = trackerByPart.get(BodyPart.LEFT_FOOT) ?? this.getBonePosition(dataByPart, BodyPart.LEFT_FOOT);
+    const rightFoot = trackerByPart.get(BodyPart.RIGHT_FOOT) ?? this.getBonePosition(dataByPart, BodyPart.RIGHT_FOOT);
+    if (!hip || !leftFoot || !rightFoot || !this.mixamoScene) return;
+
+    const now = performance.now();
+    const dt = Math.max((now - this.lastPoseTime) / 1000, 1 / 120);
+    this.lastPoseTime = now;
+
+    if (!this.poseCalibrated) {
+      this.calibratedHip.copy(hip);
+      this.floorY = Math.min(leftFoot.y, rightFoot.y);
+      this.resetLocomotionState(hip, leftFoot, rightFoot);
+      this.mixamoScene.position.set(0, 0, 0);
+      this.poseCalibrated = true;
+    }
+
+    // The hip bone always sits at its bind-pose local position. In walk mode ALL
+    // translation (including vertical squat/sit) is carried by the model translation,
+    // which applyFootPlant() derives from the posed skeleton after the bone loop.
+    rootBone.position.copy(this.bindHipLocalPosition);
+
+    if (!walkEnabled) {
+      // Known-good path: vertical follows the server hip, no horizontal translation.
+      rootBone.position.y += hip.y - this.calibratedHip.y;
+      this.resetLocomotionState(hip, leftFoot, rightFoot);
+      this.walkActive = false;
+      this.mixamoScene.position.set(0, 0, 0);
+      return;
+    }
+
+    // Walk off -> on: reset contact state but KEEP the current translation (no jump).
+    if (!this.walkActive) {
+      this.resetLocomotionState(hip, leftFoot, rightFoot);
+      this.walkActive = true;
+    }
+
+    // Filter foot noise before contact detection (vertical kept raw for responsiveness).
+    const fLeftFoot = this.leftFootFilter.filter(leftFoot, dt);
+    const fRightFoot = this.rightFootFilter.filter(rightFoot, dt);
+    fLeftFoot.y = leftFoot.y;
+    fRightFoot.y = rightFoot.y;
+
+    // Decide which foot is planted (+ debounced weight transfer). The actual root
+    // translation happens later, in applyFootPlant(), using the POSED foot.
+    this.updateFootContact(fLeftFoot, fRightFoot, dt);
+
+    // Adapt filter strength based on contact: planted = more smoothing, swinging = less latency
+    this.updateFilterCutoffs();
+  }
+
+  // Resets all locomotion state to "parked at the current pose, zero translation" --
+  // used on first calibration, on walk-mode enable, on walk-mode disable, and from
+  // resetLocomotion() (server Reset Full/Yaw/Mounting), so every one of those events
+  // starts clean instead of carrying over stale anchors from a different reference frame.
+  private resetLocomotionState(hip: THREE.Vector3, leftFoot: THREE.Vector3, rightFoot: THREE.Vector3) {
+    this.hipWorldTarget.copy(hip);
+    this.appliedRoot.set(0, 0, 0);
+    this.hipFilter.reset(hip);
+    this.leftFootFilter.reset(leftFoot);
+    this.rightFootFilter.reset(rightFoot);
+    this.plantedFoot = null;
+    this.plantedGrounded = false;
+    this.contactCandidate = null;
+    this.contactCandidateFrames = 0;
+    this.stationary = false;
+    this.stationaryLockX = 0;
+    this.stationaryLockZ = 0;
+    this.plantJustChanged = false;
+    this.plantFrameCount = 0;
+    this.floorCaptured = false;
+    this.previousLeftFoot = leftFoot.clone();
+    this.previousRightFoot = rightFoot.clone();
+    this.previousHip = hip.clone();
+  }
+
+  /**
+   * Foot-lock root solver. Anchors the planted foot to a fixed world point (with a
+   * shared ground plane at `floorY`) and derives the hip position that keeps that foot
+   * planted given the current leg pose: `hipWorld = anchor - (foot - hip)`.
+   *
+   * This produces both effects from one rule:
+   *  - Squat/sit: as the knee bends the foot rises relative to the hip, so the hip is
+   *    pushed down to keep the foot on the floor (instead of the foot floating up).
+   *  - Walking: as the body passes over the stance foot, the hip advances by the full
+   *    real stride in the leg's own direction.
+   *
+   * Two extra safeguards keep this stable at rest without adding lag while moving:
+   *  - Contact-state changes are debounced (CONTACT_DEBOUNCE_FRAMES) so a single noisy
+   *    frame cannot trigger a reanchor -- only a persistent change can. This is what
+   *    stops the root from randomly walking away from center while standing still.
+   *  - A horizontal-only "stationary lock" pins x/z to a fixed point whenever filtered
+   *    hip speed is near zero (hysteresis via enter/exit thresholds), so translation can
+   *    only happen in response to genuine, sustained movement. Vertical is never gated
+   *    by this, so squats/sitting still work while otherwise stationary.
+   */
+
+// Decides which foot is planted and handles debounced weight transfer. It computes NO
+  // root translation -- that happens in applyFootPlant() from the posed skeleton. Sets
+  // plantJustChanged whenever the planted foot is (re)assigned so planting re-anchors
+  // without a jump.
+  private updateFootContact(leftFoot: THREE.Vector3, rightFoot: THREE.Vector3, dt: number) {
+    const leftSpeed = this.previousLeftFoot ? this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt : 0;
+    const rightSpeed = this.previousRightFoot ? this.horizontalDistance(rightFoot, this.previousRightFoot) / dt : 0;
+
+    const leftContact = leftFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT;
+    const rightContact = rightFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT;
+
+    let best: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+    if (leftContact && rightContact) {
+      if (Math.abs(leftFoot.y - rightFoot.y) > 0.02) {
+        best = leftFoot.y < rightFoot.y ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+      } else {
+        best = leftSpeed <= rightSpeed ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+      }
+    } else if (leftContact) {
+      best = BodyPart.LEFT_FOOT;
+    } else if (rightContact) {
+      best = BodyPart.RIGHT_FOOT;
+    }
+
+    const plantedContact = this.plantedFoot === BodyPart.LEFT_FOOT
+      ? leftContact
+      : this.plantedFoot === BodyPart.RIGHT_FOOT
+        ? rightContact
+        : false;
+
+    if (this.plantedFoot != null && this.plantedGrounded && plantedContact) {
+      // Keep the current plant -> anchor stays fixed -> foot stays put on the floor.
+      this.contactCandidate = null;
+      this.contactCandidateFrames = 0;
+    } else if (best != null) {
+      // Same foot regained contact after a transient sensor dropout —
+      // re-ground immediately. Only debounce when switching feet.
+      if (best === this.plantedFoot && plantedContact) {
+        this.plantedGrounded = true;
+        this.contactCandidate = null;
+        this.contactCandidateFrames = 0;
+      } else {
+        const firstPlant = this.plantedFoot == null;
+        if (this.contactCandidate === best) {
+          this.contactCandidateFrames++;
+        } else {
+          this.contactCandidate = best;
+          this.contactCandidateFrames = 1;
+        }
+        if (firstPlant || this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
+          this.plantedFoot = best;
+          this.plantedGrounded = true;
+          this.plantJustChanged = true; // applyFootPlant() re-anchors to the posed foot
+          this.contactCandidate = null;
+          this.contactCandidateFrames = 0;
+        }
+      }
+    } else {
+      this.contactCandidate = null;
+      this.contactCandidateFrames = 0;
+      this.plantedGrounded = false;
+    }
+
+    this.previousLeftFoot!.copy(leftFoot);
+    this.previousRightFoot!.copy(rightFoot);
+    this.leftContact = leftContact;
+    this.rightContact = rightContact;
+  }
+
+  private updateFilterCutoffs() {
+    const planted = this.leftContact || this.rightContact;
+    const cutoff = planted ? 0.8 : 2.5;
+    if (this.currentFilterCutoff !== cutoff) {
+      this.currentFilterCutoff = cutoff;
+      this.hipFilter.setMinCutoff(cutoff);
+      this.leftFootFilter.setMinCutoff(cutoff);
+      this.rightFootFilter.setMinCutoff(cutoff);
+    }
+  }
+
+  // Runs AFTER the whole skeleton has been posed from the rotation stream. Translates
+  // the model so the planted foot bone sits on its fixed world anchor (x,z) and on the
+  // model's own floor level (y). Reading the foot from the posed skeleton is the whole
+  // trick: the root now moves in lockstep with the leg rotations, so there is no
+  // vertical lag (issue 1) and the planted foot never slides (issue 2) -- the hips move
+  // over a fixed foot, exactly like a real sit/stand.
+  private applyFootPlant(walkEnabled: boolean) {
+    if (!this.mixamoScene || !walkEnabled) return;
+
+    const leftBone = this.mixamoBones.get(BodyPart.LEFT_FOOT);
+    const rightBone = this.mixamoBones.get(BodyPart.RIGHT_FOOT);
+    if (!leftBone || !rightBone) return;
+
+    const lw = leftBone.getWorldPosition(this._lFootWorld);
+    const rw = rightBone.getWorldPosition(this._rFootWorld);
+
+    // Capture the model's floor level once, from the lower foot at the first plant.
+    if (!this.floorCaptured) {
+      this.floorYModel = Math.min(lw.y, rw.y);
+      this.floorCaptured = true;
+    }
+
+    // VERTICAL (issue 1): pin the LOWEST posed foot to the floor every frame, regardless
+    // of the contact/plant boolean. The body then follows the legs down with zero lag,
+    // even on a fast sit where the debounced contact momentarily drops out (which used
+    // to leave the feet floating until it snapped down).
+    let corrY = this.floorYModel - Math.min(lw.y, rw.y);
+
+    // HORIZONTAL: foot-lock the debounced planted foot to a fixed anchor.
+    // Correction is derived from an EMA-filtered model-space foot position
+    // (root-independent, pure leg FK) so that sensor rotation noise does not
+    // produce a random walk in the root. With no valid plant we hold x/z
+    // (correction 0) so nothing slides.
+    let corrX = 0;
+    let corrZ = 0;
+    const plantJustChangedThisFrame = this.plantJustChanged;
+    if (this.plantedFoot != null && this.plantedGrounded) {
+      const fw = this.plantedFoot === BodyPart.LEFT_FOOT ? lw : rw;
+      if (plantJustChangedThisFrame) {
+        this.anchor.set(fw.x, this.floorYModel, fw.z);
+        this.plantJustChanged = false;
+        this.plantFrameCount = 0;
+      }
+      corrX = this.anchor.x - fw.x;
+      corrZ = this.anchor.z - fw.z;
+      this.plantFrameCount++;
+    }
+
+    const hClamp = Math.hypot(corrX, corrZ);
+    if (hClamp > MAX_ROOT_STEP) {
+      const s = MAX_ROOT_STEP / hClamp;
+      corrX *= s;
+      corrZ *= s;
+    }
+    corrY = Math.max(-MAX_ROOT_STEP, Math.min(MAX_ROOT_STEP, corrY));
+
+    this._plantCorr.set(corrX, corrY, corrZ);
+
+    const p = this.mixamoScene.position;
+    p.x += this._plantCorr.x;
+    p.z += this._plantCorr.z;
+    p.y += this._plantCorr.y;
+    this.mixamoScene.updateMatrixWorld(true);
+
+    this._walkDebugSnapshot = {
+      plantedFoot: this.plantedFoot ?? null,
+      plantJustChanged: plantJustChangedThisFrame,
+      leftContact: this.leftContact,
+      rightContact: this.rightContact,
+      contactCandidate: this.contactCandidate ?? null,
+      contactCandidateFrames: this.contactCandidateFrames,
+      plantFrameCount: this.plantFrameCount,
+      leftFootX: lw.x, leftFootY: lw.y, leftFootZ: lw.z,
+      rightFootX: rw.x, rightFootY: rw.y, rightFootZ: rw.z,
+      anchorX: this.anchor.x, anchorY: this.anchor.y, anchorZ: this.anchor.z,
+      corrX: this._plantCorr.x, corrY: this._plantCorr.y, corrZ: this._plantCorr.z,
+      rootX: this.mixamoScene.position.x,
+      rootY: this.mixamoScene.position.y,
+      rootZ: this.mixamoScene.position.z,
+    };
+  }
+
+  private getBonePosition(dataByPart: Map<BodyPart, BoneT>, bodyPart: BodyPart): THREE.Vector3 | null {
+    const p = dataByPart.get(bodyPart)?.headPositionG;
+    return p ? new THREE.Vector3(p.x, p.y, p.z) : null;
+  }
+
+  private getSyntheticTrackerPositions(trackers: TrackerDataT[]) {
+    const positions = new Map<BodyPart, THREE.Vector3>();
+
+    for (const tracker of trackers) {
+      const bodyPart = tracker.info?.bodyPart;
+      const position = tracker.position;
+      if (bodyPart == null || bodyPart === BodyPart.NONE || !position) continue;
+      positions.set(bodyPart, new THREE.Vector3(position.x, position.y, position.z));
+    }
+
+    return positions;
+  }
+
+  private horizontalDistance(a: THREE.Vector3, b: THREE.Vector3) {
+    const dx = a.x - b.x;
+    const dz = a.z - b.z;
+    return Math.sqrt(dx * dx + dz * dz);
   }
 
   private hideStickFigure() {
@@ -468,8 +944,23 @@ export class MocapScene {
     const animate = () => {
       this.animFrameId = requestAnimationFrame(animate);
       this.renderer.render(this.scene, this.camera);
+      if (this.postRenderCallback) {
+        this.postRenderCallback();
+      }
     };
     animate();
+  }
+
+  setPostRenderCallback(cb: (() => void) | null) {
+    this.postRenderCallback = cb;
+  }
+
+  setPelvisPositionCallback(cb: ((pos: THREE.Vector3, timestamp: number) => void) | null) {
+    this.pelvisPositionCallback = cb;
+  }
+
+  setWalkDebugCallback(cb: ((data: WalkDebugFrame, timestamp: number) => void) | null) {
+    this.walkDebugCallback = cb;
   }
 
   stop() {

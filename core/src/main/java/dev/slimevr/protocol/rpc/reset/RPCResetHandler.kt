@@ -50,6 +50,7 @@ class RPCResetHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) : ResetL
 			} else {
 				resetsConfig.yawResetDelay
 			}
+			api.server.markCsvEvent("RESET_YAW")
 			if (bodyParts.isEmpty()) {
 				api.server.scheduleResetTrackersYaw(RESET_SOURCE_NAME, (delay * 1000).toLong(), tx = tx)
 			} else {
@@ -62,6 +63,7 @@ class RPCResetHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) : ResetL
 			} else {
 				resetsConfig.fullResetDelay
 			}
+			api.server.markCsvEvent("RESET_FULL")
 			if (bodyParts.isEmpty()) {
 				api.server.scheduleResetTrackersFull(RESET_SOURCE_NAME, (delay * 1000).toLong(), tx = tx)
 			} else {
@@ -74,6 +76,7 @@ class RPCResetHandler(var rpcHandler: RPCHandler, var api: ProtocolAPI) : ResetL
 			} else {
 				resetsConfig.mountingResetDelay
 			}
+			api.server.markCsvEvent("RESET_MOUNTING")
 			if (bodyParts.isEmpty()) {
 				api.server.scheduleResetTrackersMounting(RESET_SOURCE_NAME, (delay * 1000).toLong(), tx = tx)
 			} else {
