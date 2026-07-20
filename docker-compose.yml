@@ -9,6 +9,12 @@ services:
       - "21111:21111"
     volumes:
       - ./config.json:/app/config.json:ro
+    devices:
+      - "/dev/ttyACM0:/dev/ttyACM0"
+    environment:
+      - BMDT_DONGLE_PORT=/dev/ttyACM0
+    group_add:
+      - dialout
 
   frontend:
     build:
