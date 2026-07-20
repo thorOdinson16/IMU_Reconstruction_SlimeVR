@@ -5,12 +5,12 @@ A minimal motion-capture pipeline using ESP32 + MPU6050 IMUs, the SlimeVR server
 ## Architecture
 
 ```
-┌──────────────────────┐      ESP-NOW         ┌──────────────┐      UDP :5005    ┌───────────────────────┐
+┌──────────────────────┐      ESP-NOW         ┌──────────────┐      UDP :5005     ┌───────────────────────┐
 │  10× Sensor Nodes    │ ──────────────────▶  │  2× Hubs     │ ────────────────▶  │   SlimeVR Server      │
 │  (MPU6050 per joint) │  (per-board label)   │ (CHEST/HIPS) │                    │  (Kotlin/JVM)         │
 └──────────────────────┘                      └──────────────┘                    │                       │
                                                                                   │  IK skeleton          │
-                                                                  WebSocket :21110 │  Reset/calibration    │
+                                                                 WebSocket :21110 │  Reset/calibration    │
                                                                       │           │  UDP text parser      │
                                                                       ▼           └───────────────────────┘
                                                            ┌──────────────────────┐
