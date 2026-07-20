@@ -1,5 +1,6 @@
 package dev.slimevr.tracking.trackers.udp
 
+import com.fazecast.jSerialComm.SerialPort
 import com.jme3.math.FastMath
 import dev.slimevr.NetworkProtocol
 import dev.slimevr.VRServer
@@ -179,6 +180,127 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		tracker.resetsHandler.mountingOrientation = position.defaultMounting()
 	}
 	// ---------- End custom parser ----------
+
+	// ---------- Dongle serial ingestion ----------
+	// Reads binary frames the dongle writes over USB CDC:
+	//   [0xAA 0x55][SensorData][checksum]
+	// where SensorData is packed as:
+	//   char label[8]; float qw,qx,qy,qz; uint16_t seq;
+	// = 8 + 16 + 2 = 26 bytes. Frame total = 2 (sync) + 26 (data) + 1 (checksum) = 29 bytes.
+	//
+	// BUILD DEPENDENCY REQUIRED (add to your Gradle build file):
+	//   implementation("com.fazecast:jSerialComm:2.10.4")
+	//
+	// NOTE: SENSOR_DATA_SIZE below must stay in sync with the firmware's
+	// SensorData struct (dongle.ino / hub.ino / sensor.ino). If that struct
+	// changes size, update this constant to match.
+
+	private val SENSOR_DATA_SIZE = 26
+	private val FRAME_SIZE = 2 + SENSOR_DATA_SIZE + 1
+	private val lastSeqByLabel = ConcurrentHashMap<String, Int>()
+
+	/**
+	 * Opens the dongle's serial port and reads binary tracker frames directly
+	 * in-process — no bridge process, no extra UDP hop. Runs on its own thread
+	 * for the server's lifetime; reconnects if the port drops.
+	 *
+	 * Port name is read from the BMDT_DONGLE_PORT env var, falling back to
+	 * /dev/ttyACM0. On Windows this will be something like "COM5". Override
+	 * as needed for your setup.
+	 */
+	private fun startDongleSerialReader() {
+		Thread({
+			val portName = System.getenv("BMDT_DONGLE_PORT") ?: "/dev/ttyACM0"
+			while (true) {
+				var port: SerialPort? = null
+				try {
+					port = SerialPort.getCommPort(portName)
+					port.setBaudRate(921600)
+					port.setComPortTimeouts(SerialPort.TIMEOUT_READ_BLOCKING, 0, 0)
+					if (!port.openPort()) {
+						LogManager.warning("[TrackerServer] Could not open dongle port $portName, retrying in 2s")
+						Thread.sleep(2000)
+						continue
+					}
+					LogManager.info("[TrackerServer] Dongle serial connected on $portName")
+
+					val inStream = port.inputStream
+					val frameBuf = ByteArray(FRAME_SIZE)
+
+					while (port.isOpen) {
+						// Resync: scan for 0xAA 0x55 sync bytes before trusting the frame.
+						if (readByteBlocking(inStream) != 0xAA) continue
+						if (readByteBlocking(inStream) != 0x55) continue
+
+						var offset = 0
+						while (offset < SENSOR_DATA_SIZE + 1) {
+							val n = inStream.read(frameBuf, offset, SENSOR_DATA_SIZE + 1 - offset)
+							if (n < 0) break
+							offset += n
+						}
+						if (offset != SENSOR_DATA_SIZE + 1) continue // short read / port hiccup, resync on next loop
+
+						val dataBytes = frameBuf.copyOfRange(0, SENSOR_DATA_SIZE)
+						val receivedChecksum = frameBuf[SENSOR_DATA_SIZE].toInt() and 0xFF
+						var checksum = 0
+						for (b in dataBytes) checksum = checksum xor (b.toInt() and 0xFF)
+						if (checksum != receivedChecksum) {
+							LogManager.warning("[TrackerServer] Dongle frame checksum mismatch, dropping")
+							continue
+						}
+
+						parseDongleFrame(dataBytes)
+					}
+				} catch (e: Exception) {
+					LogManager.warning("[TrackerServer] Dongle serial error: ${e.message}, reconnecting in 2s")
+				} finally {
+					port?.closePort()
+				}
+				Thread.sleep(2000)
+			}
+		}, "DongleSerialReader").apply {
+			isDaemon = true
+			start()
+		}
+	}
+
+	private fun readByteBlocking(stream: java.io.InputStream): Int {
+		return stream.read() // -1 on stream close; caller loop just re-checks port.isOpen
+	}
+
+	/**
+	 * Unpacks one 26-byte SensorData struct and feeds it into the existing
+	 * text-packet parser, reusing all of its tracker-creation, alignment-
+	 * calibration, and rotation logic unchanged.
+	 */
+	private fun parseDongleFrame(dataBytes: ByteArray) {
+		val bb = ByteBuffer.wrap(dataBytes).order(ByteOrder.LITTLE_ENDIAN) // ESP32 is little-endian
+
+		val labelBytes = dataBytes.copyOfRange(0, 8)
+		val label = String(labelBytes, Charsets.US_ASCII).trimEnd('\u0000')
+
+		bb.position(8)
+		val qw = bb.float
+		val qx = bb.float
+		val qy = bb.float
+		val qz = bb.float
+		val seq = bb.short.toInt() and 0xFFFF
+
+		// Loss detection: log gaps, don't act on them (per design — no retry/ack).
+		val prevSeq = lastSeqByLabel.put(label, seq)
+		if (prevSeq != null) {
+			val expected = (prevSeq + 1) and 0xFFFF
+			if (seq != expected) {
+				val gap = (seq - expected) and 0xFFFF
+				LogManager.warning("[TrackerServer] Dropped $gap frame(s) for $label")
+			}
+		}
+
+		// Reuse the existing parser instead of duplicating tracker setup /
+		// alignment / rotation logic — same code path as UDP text packets.
+		parseTextPacket("$label,$qw,$qx,$qy,$qz")
+	}
+	// ---------- End dongle serial ingestion ----------
 
 	private fun setUpNewConnection(handshakePacket: DatagramPacket, handshake: UDPPacket3Handshake) {
 		LogManager.info("[TrackerServer] Handshake received from ${handshakePacket.address}:${handshakePacket.port}")
@@ -418,6 +540,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		try {
 			socket = DatagramSocket(port)
 			LogManager.info("[TrackerServer] UDP socket bound to port $port")
+			startDongleSerialReader()
 			var prevPacketTime = System.currentTimeMillis()
 			socket.soTimeout = 250
 			while (true) {

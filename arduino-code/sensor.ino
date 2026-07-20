@@ -29,6 +29,7 @@ esp_now_peer_info_t peerInfo;
 struct SensorData {
   char label[8];
   float qw, qx, qy, qz;
+  uint16_t seq;   // per-sensor monotonic counter, wraps — for loss detection downstream
 };
 struct ProbePacket {
   char magic[4];   // "WHO?"
@@ -40,6 +41,7 @@ struct ProbeReply {
 #pragma pack()
 
 SensorData data;
+uint16_t sendSeq = 0;
 
 // Discovery dwell time — conservative, per requirement that this must work
 // reliably even if it's slow. 300ms/channel * 13 channels ~= 3.9s per sweep.
@@ -213,5 +215,6 @@ void loop() {
   if (!gotPacket) return;
 
   data.qw = q.w; data.qx = q.x; data.qy = q.y; data.qz = q.z;
+  data.seq = sendSeq++;
   esp_now_send(HUB_MAC, (uint8_t*)&data, sizeof(data));
 }

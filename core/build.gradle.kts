@@ -57,6 +57,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
     implementation("com.mayakapps.kache:kache:2.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    implementation("com.fazecast:jSerialComm:2.10.4")
 
     implementation(kotlin("reflect"))
 
