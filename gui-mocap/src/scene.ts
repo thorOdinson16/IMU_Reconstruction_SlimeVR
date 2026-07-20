@@ -15,6 +15,8 @@ export interface WalkDebugFrame {
   anchorX: number; anchorY: number; anchorZ: number;
   corrX: number; corrY: number; corrZ: number;
   rootX: number; rootY: number; rootZ: number;
+  leftAnchorX: number; leftAnchorY: number; leftAnchorZ: number;
+  rightAnchorX: number; rightAnchorY: number; rightAnchorZ: number;
 }
 
 // One Euro Filter (Casiez et al.): an adaptive low-pass filter that smooths noise
@@ -233,13 +235,15 @@ export class MocapScene {
   // maps to the origin. The relative geometry (foot - hip) used below is invariant to
   // any global drift the server might apply, which is why it is robust.
   private hipWorldTarget = new THREE.Vector3(); // desired hip world position this frame
-  private anchor = new THREE.Vector3();          // locked world position of the planted foot
+  private leftAnchor: THREE.Vector3 | null = null;   // locked world position of left foot
+  private rightAnchor: THREE.Vector3 | null = null;  // locked world position of right foot
   private appliedRoot = new THREE.Vector3();     // last root translation actually applied
-  private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
-  private plantedGrounded = false;
   // A contact-state change must persist this many frames before we trust it and
   // re-anchor -- this is what tells intentional weight transfer apart from one noisy
   // frame, so standing still can't slowly random-walk the root away from center.
+  // Debounce only applies to the 0→1 transition (no foot anchored → first foot
+  // anchored). Once at least one foot is anchored, the second foot can join with no
+  // debounce (double-support) and either foot can lift off immediately.
   private contactCandidate: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
   private contactCandidateFrames = 0;
   // Horizontal-only stationary lock: while hip speed stays below the enter threshold the
@@ -249,7 +253,8 @@ export class MocapScene {
   private stationaryLockX = 0;
   private stationaryLockZ = 0;
   private walkActive = false;
-  private plantJustChanged = false;
+  private leftPlantJustChanged = false;
+  private rightPlantJustChanged = false;
   private plantFrameCount = 0;
   private leftContact = false;
   private rightContact = false;
@@ -258,6 +263,8 @@ export class MocapScene {
   private floorCaptured = false;
   private _lFootWorld = new THREE.Vector3();
   private _rFootWorld = new THREE.Vector3();
+  private _lTemp = new THREE.Vector3();
+  private _rTemp = new THREE.Vector3();
   private _plantCorr = new THREE.Vector3();
   private hipFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
   private leftFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
@@ -438,7 +445,8 @@ export class MocapScene {
     this.poseCalibrated = false;
     this.walkActive = false;
     this.floorCaptured = false;
-    this.plantJustChanged = false;
+    this.leftPlantJustChanged = false;
+    this.rightPlantJustChanged = false;
   }
 
   update(bones: BoneT[], syntheticTrackers: TrackerDataT[] = [], walkEnabled = false) {
@@ -608,14 +616,15 @@ private updateRootAndPelvis(
     this.hipFilter.reset(hip);
     this.leftFootFilter.reset(leftFoot);
     this.rightFootFilter.reset(rightFoot);
-    this.plantedFoot = null;
-    this.plantedGrounded = false;
+    this.leftAnchor = null;
+    this.rightAnchor = null;
     this.contactCandidate = null;
     this.contactCandidateFrames = 0;
     this.stationary = false;
     this.stationaryLockX = 0;
     this.stationaryLockZ = 0;
-    this.plantJustChanged = false;
+    this.leftPlantJustChanged = false;
+    this.rightPlantJustChanged = false;
     this.plantFrameCount = 0;
     this.floorCaptured = false;
     this.previousLeftFoot = leftFoot.clone();
@@ -644,10 +653,17 @@ private updateRootAndPelvis(
    *    by this, so squats/sitting still work while otherwise stationary.
    */
 
-// Decides which foot is planted and handles debounced weight transfer. It computes NO
+  // Decides which feet are planted and handles debounced weight transfer. It computes NO
   // root translation -- that happens in applyFootPlant() from the posed skeleton. Sets
-  // plantJustChanged whenever the planted foot is (re)assigned so planting re-anchors
-  // without a jump.
+  // leftPlantJustChanged / rightPlantJustChanged whenever the respective foot is newly
+  // (re)assigned so planting re-anchors without a jump.
+  //
+  // Two modes:
+  //   A) No foot anchored (both null) — use debounced best-foot selection to establish
+  //      the first anchor. Prevents a single noisy "contact" frame from locking an anchor.
+  //   B) At least one foot anchored — each foot is managed independently with no
+  //      debounce: contact → anchor immediately (double-support entry), no-contact →
+  //      clear anchor immediately (lift-off). If both lift off we fall back to mode A.
   private updateFootContact(leftFoot: THREE.Vector3, rightFoot: THREE.Vector3, dt: number) {
     const leftSpeed = this.previousLeftFoot ? this.horizontalDistance(leftFoot, this.previousLeftFoot) / dt : 0;
     const rightSpeed = this.previousRightFoot ? this.horizontalDistance(rightFoot, this.previousRightFoot) / dt : 0;
@@ -655,56 +671,69 @@ private updateRootAndPelvis(
     const leftContact = leftFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT;
     const rightContact = rightFoot.y - this.floorY <= FOOT_CONTACT_HEIGHT;
 
-    let best: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
-    if (leftContact && rightContact) {
-      if (Math.abs(leftFoot.y - rightFoot.y) > 0.02) {
-        best = leftFoot.y < rightFoot.y ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
-      } else {
-        best = leftSpeed <= rightSpeed ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+    const leftPlanted = this.leftAnchor != null;
+    const rightPlanted = this.rightAnchor != null;
+    const anyPlanted = leftPlanted || rightPlanted;
+
+    if (!anyPlanted) {
+      // Mode A — no foot anchored. Debounce the establishment of the first anchor
+      // so a single noisy contact frame cannot lock a spurious anchor.
+      let best: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+      if (leftContact && rightContact) {
+        if (Math.abs(leftFoot.y - rightFoot.y) > 0.02) {
+          best = leftFoot.y < rightFoot.y ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+        } else {
+          best = leftSpeed <= rightSpeed ? BodyPart.LEFT_FOOT : BodyPart.RIGHT_FOOT;
+        }
+      } else if (leftContact) {
+        best = BodyPart.LEFT_FOOT;
+      } else if (rightContact) {
+        best = BodyPart.RIGHT_FOOT;
       }
-    } else if (leftContact) {
-      best = BodyPart.LEFT_FOOT;
-    } else if (rightContact) {
-      best = BodyPart.RIGHT_FOOT;
-    }
 
-    const plantedContact = this.plantedFoot === BodyPart.LEFT_FOOT
-      ? leftContact
-      : this.plantedFoot === BodyPart.RIGHT_FOOT
-        ? rightContact
-        : false;
-
-    if (this.plantedFoot != null && this.plantedGrounded && plantedContact) {
-      // Keep the current plant -> anchor stays fixed -> foot stays put on the floor.
-      this.contactCandidate = null;
-      this.contactCandidateFrames = 0;
-    } else if (best != null) {
-      // Same foot regained contact after a transient sensor dropout —
-      // re-ground immediately. Only debounce when switching feet.
-      if (best === this.plantedFoot && plantedContact) {
-        this.plantedGrounded = true;
-        this.contactCandidate = null;
-        this.contactCandidateFrames = 0;
-      } else {
-        const firstPlant = this.plantedFoot == null;
+      if (best != null) {
         if (this.contactCandidate === best) {
           this.contactCandidateFrames++;
         } else {
           this.contactCandidate = best;
           this.contactCandidateFrames = 1;
         }
-        if (firstPlant || this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
-          this.plantedFoot = best;
-          this.plantedGrounded = true;
-          this.plantJustChanged = true; // applyFootPlant() re-anchors to the posed foot
+        if (this.contactCandidateFrames >= CONTACT_DEBOUNCE_FRAMES) {
+          if (best === BodyPart.LEFT_FOOT) {
+            this.leftAnchor = this._lTemp.set(leftFoot.x, this.floorYModel, leftFoot.z).clone();
+            this.leftPlantJustChanged = true;
+          } else {
+            this.rightAnchor = this._rTemp.set(rightFoot.x, this.floorYModel, rightFoot.z).clone();
+            this.rightPlantJustChanged = true;
+          }
           this.contactCandidate = null;
           this.contactCandidateFrames = 0;
         }
+      } else {
+        this.contactCandidate = null;
+        this.contactCandidateFrames = 0;
       }
     } else {
+      // Mode B — at least one foot is anchored. Each foot manages its own anchor
+      // immediately, with no debounce. The second foot can join in a single frame
+      // (double-support entry) and either foot lifts off in a single frame (swing).
+      // If both lift off we naturally fall back to Mode A next frame.
       this.contactCandidate = null;
       this.contactCandidateFrames = 0;
-      this.plantedGrounded = false;
+
+      if (leftContact && !leftPlanted) {
+        this.leftAnchor = this._lTemp.set(leftFoot.x, this.floorYModel, leftFoot.z).clone();
+        this.leftPlantJustChanged = true;
+      } else if (!leftContact && leftPlanted) {
+        this.leftAnchor = null;
+      }
+
+      if (rightContact && !rightPlanted) {
+        this.rightAnchor = this._rTemp.set(rightFoot.x, this.floorYModel, rightFoot.z).clone();
+        this.rightPlantJustChanged = true;
+      } else if (!rightContact && rightPlanted) {
+        this.rightAnchor = null;
+      }
     }
 
     this.previousLeftFoot!.copy(leftFoot);
@@ -752,25 +781,63 @@ private updateRootAndPelvis(
     // to leave the feet floating until it snapped down).
     let corrY = this.floorYModel - Math.min(lw.y, rw.y);
 
-    // HORIZONTAL: foot-lock the debounced planted foot to a fixed anchor.
-    // Correction is derived from an EMA-filtered model-space foot position
-    // (root-independent, pure leg FK) so that sensor rotation noise does not
-    // produce a random walk in the root. With no valid plant we hold x/z
-    // (correction 0) so nothing slides.
+    // HORIZONTAL: foot-lock each planted foot to its own fixed anchor. When only one
+    // foot is planted, correct against that one. When both are planted (double support),
+    // blend the correction from both anchors so neither foot slides during weight transfer.
+    // With no anchored foot (airborne) we hold x/z (correction 0) so nothing slides.
     let corrX = 0;
     let corrZ = 0;
-    const plantJustChangedThisFrame = this.plantJustChanged;
-    if (this.plantedFoot != null && this.plantedGrounded) {
-      const fw = this.plantedFoot === BodyPart.LEFT_FOOT ? lw : rw;
-      if (plantJustChangedThisFrame) {
-        this.anchor.set(fw.x, this.floorYModel, fw.z);
-        this.plantJustChanged = false;
-        this.plantFrameCount = 0;
+    let effectiveAnchorX = 0;
+    let effectiveAnchorY = this.floorYModel;
+    let effectiveAnchorZ = 0;
+    const leftPlanted = this.leftAnchor != null;
+    const rightPlanted = this.rightAnchor != null;
+    const leftChanged = this.leftPlantJustChanged;
+    const rightChanged = this.rightPlantJustChanged;
+
+    if (leftPlanted && rightPlanted) {
+      // Double support — blend correction from both anchors so neither foot slides
+      if (leftChanged) {
+        this.leftAnchor!.set(lw.x, this.floorYModel, lw.z);
+        this.leftPlantJustChanged = false;
       }
-      corrX = this.anchor.x - fw.x;
-      corrZ = this.anchor.z - fw.z;
+      if (rightChanged) {
+        this.rightAnchor!.set(rw.x, this.floorYModel, rw.z);
+        this.rightPlantJustChanged = false;
+      }
+      const lCorrX = this.leftAnchor!.x - lw.x;
+      const lCorrZ = this.leftAnchor!.z - lw.z;
+      const rCorrX = this.rightAnchor!.x - rw.x;
+      const rCorrZ = this.rightAnchor!.z - rw.z;
+      corrX = (lCorrX + rCorrX) / 2;
+      corrZ = (lCorrZ + rCorrZ) / 2;
+      effectiveAnchorX = (this.leftAnchor!.x + this.rightAnchor!.x) / 2;
+      effectiveAnchorZ = (this.leftAnchor!.z + this.rightAnchor!.z) / 2;
+      this.plantFrameCount++;
+    } else if (leftPlanted) {
+      // Sole stance — left foot only
+      if (leftChanged) {
+        this.leftAnchor!.set(lw.x, this.floorYModel, lw.z);
+        this.leftPlantJustChanged = false;
+      }
+      corrX = this.leftAnchor!.x - lw.x;
+      corrZ = this.leftAnchor!.z - lw.z;
+      effectiveAnchorX = this.leftAnchor!.x;
+      effectiveAnchorZ = this.leftAnchor!.z;
+      this.plantFrameCount++;
+    } else if (rightPlanted) {
+      // Sole stance — right foot only
+      if (rightChanged) {
+        this.rightAnchor!.set(rw.x, this.floorYModel, rw.z);
+        this.rightPlantJustChanged = false;
+      }
+      corrX = this.rightAnchor!.x - rw.x;
+      corrZ = this.rightAnchor!.z - rw.z;
+      effectiveAnchorX = this.rightAnchor!.x;
+      effectiveAnchorZ = this.rightAnchor!.z;
       this.plantFrameCount++;
     }
+    // else: both airborne — corrX/corrZ stay 0, plantFrameCount frozen, no anchor
 
     const hClamp = Math.hypot(corrX, corrZ);
     if (hClamp > MAX_ROOT_STEP) {
@@ -788,9 +855,18 @@ private updateRootAndPelvis(
     p.y += this._plantCorr.y;
     this.mixamoScene.updateMatrixWorld(true);
 
+    // Derive single-foot compat fields for debug: plantedFoot is the foot that has been
+    // planted, preferring the one anchoring sole stance, or null when airborne.
+    const compatPlantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null =
+      (leftPlanted && !rightPlanted) ? BodyPart.LEFT_FOOT
+      : (!leftPlanted && rightPlanted) ? BodyPart.RIGHT_FOOT
+      : (leftPlanted && rightPlanted) ? (leftChanged ? BodyPart.LEFT_FOOT : rightChanged ? BodyPart.RIGHT_FOOT : BodyPart.LEFT_FOOT)
+      : null;
+    const compatPlantJustChanged = leftChanged || rightChanged;
+
     this._walkDebugSnapshot = {
-      plantedFoot: this.plantedFoot ?? null,
-      plantJustChanged: plantJustChangedThisFrame,
+      plantedFoot: compatPlantedFoot,
+      plantJustChanged: compatPlantJustChanged,
       leftContact: this.leftContact,
       rightContact: this.rightContact,
       contactCandidate: this.contactCandidate ?? null,
@@ -798,11 +874,17 @@ private updateRootAndPelvis(
       plantFrameCount: this.plantFrameCount,
       leftFootX: lw.x, leftFootY: lw.y, leftFootZ: lw.z,
       rightFootX: rw.x, rightFootY: rw.y, rightFootZ: rw.z,
-      anchorX: this.anchor.x, anchorY: this.anchor.y, anchorZ: this.anchor.z,
+      anchorX: effectiveAnchorX, anchorY: effectiveAnchorY, anchorZ: effectiveAnchorZ,
       corrX: this._plantCorr.x, corrY: this._plantCorr.y, corrZ: this._plantCorr.z,
       rootX: this.mixamoScene.position.x,
       rootY: this.mixamoScene.position.y,
       rootZ: this.mixamoScene.position.z,
+      leftAnchorX: this.leftAnchor ? this.leftAnchor.x : 0,
+      leftAnchorY: this.leftAnchor ? this.leftAnchor.y : 0,
+      leftAnchorZ: this.leftAnchor ? this.leftAnchor.z : 0,
+      rightAnchorX: this.rightAnchor ? this.rightAnchor.x : 0,
+      rightAnchorY: this.rightAnchor ? this.rightAnchor.y : 0,
+      rightAnchorZ: this.rightAnchor ? this.rightAnchor.z : 0,
     };
   }
 

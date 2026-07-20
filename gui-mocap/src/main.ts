@@ -141,6 +141,8 @@ scene.setWalkDebugCallback((data, ts) => {
     data.anchorX, data.anchorY, data.anchorZ,
     data.corrX, data.corrY, data.corrZ,
     data.rootX, data.rootY, data.rootZ,
+    data.leftAnchorX, data.leftAnchorY, data.leftAnchorZ,
+    data.rightAnchorX, data.rightAnchorY, data.rightAnchorZ,
   ].join(','));
 });
 
