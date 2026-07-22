@@ -11,8 +11,8 @@
 //   L_FA, L_UA, R_FA, R_UA  ->  HUB_MAC = CHEST  (E8:3D:C1:9C:50:14)
 //   L_SH, L_TH, R_SH, R_TH  ->  HUB_MAC = HIPS   (A4:CB:8F:1E:A5:B8)
 // ============================================================
-const char* SENSOR_LABEL = "L_FA";
-uint8_t HUB_MAC[] = {0xE8, 0x3D, 0xC1, 0x9C, 0x50, 0x14};   // CHEST
+const char* SENSOR_LABEL = "L_UA";
+uint8_t HUB_MAC[] = {0xE8, 0x3D, 0xC1, 0x9F, 0x06, 0xOC};   // CHEST
 // ============================================================
 
 const int LED_RED   = 1;

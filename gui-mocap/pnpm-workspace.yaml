@@ -1,2 +1,6 @@
 allowBuilds:
+<<<<<<< HEAD
   esbuild: set this to true or false
+=======
+  esbuild: true
+>>>>>>> feature/applications

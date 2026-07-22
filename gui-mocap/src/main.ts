@@ -5,6 +5,11 @@ import { YogaModule } from './applications/yoga/YogaModule';
 import { JointScore } from './pose/types';
 import tadasana from './applications/yoga/poses/tadasana';
 import vrikshasana from './applications/yoga/poses/vrikshasana';
+<<<<<<< HEAD
+=======
+import adhoMukhaSvanasana from './applications/yoga/poses/adhomukhasvanasana';
+import siddhasana from './applications/yoga/poses/siddhasana';
+>>>>>>> feature/applications
 
 const connStatus = document.getElementById('conn-status')!;
 const trackerCount = document.getElementById('tracker-count')!;
@@ -18,17 +23,34 @@ const yogaPoseSelect = document.getElementById('yoga-pose-select') as HTMLSelect
 const yogaScore = document.getElementById('yoga-score')!;
 const yogaHold = document.getElementById('yoga-hold')!;
 const yogaStatus = document.getElementById('yoga-status')!;
+<<<<<<< HEAD
+=======
+const angleDebug = document.getElementById('angle-debug');
+>>>>>>> feature/applications
 
 const WS_URL = `ws://${location.hostname}:21110`;
 
-const scene = new MocapScene(canvas, (status) => {
-  modelStatus.textContent = status;
-});
+const scene = new MocapScene(
+  canvas,
+  (status) => {
+    modelStatus.textContent = status;
+  },
+  (lines) => {
+    if (!angleDebug) return;
+    angleDebug.innerHTML = lines
+      .map((l) => (l.includes('GREEN') ? `<span class="green-line">${l}</span>` : l))
+      .join('\n');
+  },
+);
 scene.start();
 
 let lastPoseTime = performance.now();
 const poseManager = new PoseManager();
+<<<<<<< HEAD
 const yogaModule = new YogaModule([tadasana, vrikshasana]);
+=======
+const yogaModule = new YogaModule([tadasana, vrikshasana, adhoMukhaSvanasana, siddhasana]);
+>>>>>>> feature/applications
 poseManager.register('yoga', yogaModule);
 
 const yogaPoses = yogaModule.getPoseList();

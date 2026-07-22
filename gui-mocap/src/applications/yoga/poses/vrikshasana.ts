@@ -31,6 +31,7 @@ const vrikshasana: PoseDefinition = {
     [BodyPart.LEFT_UPPER_LEG]:   { x: 0, y: 0, z: 0, w: 1 },
     [BodyPart.LEFT_LOWER_LEG]:   { x: 0, y: 0, z: 0, w: 1 },
     [BodyPart.LEFT_FOOT]:        { x: 0, y: 0, z: 0, w: 1 },
+<<<<<<< HEAD
     // Raised (right) leg: knee bent outward ~80°, foot resting on inner thigh
     [BodyPart.RIGHT_UPPER_LEG]:  { x: -0.342, y: -0.306, z: 0.410, w: 0.796 },
     [BodyPart.RIGHT_LOWER_LEG]:  { x: 0.270, y: 0.431, z: -0.147, w: 0.849 },
@@ -40,6 +41,20 @@ const vrikshasana: PoseDefinition = {
     [BodyPart.LEFT_LOWER_ARM]:   { x: -0.653, y: 0.271, z: -0.271, w: 0.653 },
     [BodyPart.RIGHT_UPPER_ARM]:  { x: -0.653, y: -0.271, z: 0.271, w: 0.653 },
     [BodyPart.RIGHT_LOWER_ARM]:  { x: -0.653, y: -0.271, z: 0.271, w: 0.653 },
+=======
+    // Raised (right) leg: hip abducted/externally rotated so the knee lifts up
+    // and out to the side, then the knee folds so the foot tucks against the
+    // standing leg's inner thigh. Upper/lower leg intentionally differ here
+    // (unlike the straight standing leg) because the knee is genuinely bent.
+    [BodyPart.RIGHT_UPPER_LEG]:  { x: 0,      y: 0,      z: 0.383,  w: 0.924 },
+    [BodyPart.RIGHT_LOWER_LEG]:  { x: -0.757, y: -0.313, z: 0.219,  w: 0.530 },
+    [BodyPart.RIGHT_FOOT]:       { x: -0.530, y: -0.219, z: 0.313,  w: 0.757 },
+    // Arms overhead, elbows softly bent, palms pressed together above the head.
+    [BodyPart.LEFT_UPPER_ARM]:   { x: 1, y: 0, z: 0, w: 0 },
+    [BodyPart.LEFT_LOWER_ARM]:   { x: 1, y: 0, z: 0, w: 0 },
+    [BodyPart.RIGHT_UPPER_ARM]:  { x: 1, y: 0, z: 0, w: 0 },
+    [BodyPart.RIGHT_LOWER_ARM]:  { x: 1, y: 0, z: 0, w: 0 },
+>>>>>>> feature/applications
   },
   jointWeights: {
     [BodyPart.HEAD]: 1.0,

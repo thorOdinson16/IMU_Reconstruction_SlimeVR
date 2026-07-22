@@ -3,6 +3,43 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { BoneT, BodyPart, TrackerDataT } from 'solarxr-protocol';
 import { JointScore } from './pose/types';
 
+<<<<<<< HEAD
+=======
+// ---- 90°/180° rotation highlight ------------------------------------------
+// A limb is "at 90°" once it's been lifted from hanging straight down until
+// it's horizontal (arm at shoulder height, leg at hip height). It's "at 180°"
+// once lifted all the way to pointing straight up (opposite of hanging rest).
+// Both are measured the same way: direction from the limb's root joint
+// (shoulder/hip) to its middle joint (elbow/knee), compared against
+// world-down.
+//   dot ≈ +1  -> hanging down (rest)
+//   dot ≈  0  -> horizontal   (90°,  green)
+//   dot ≈ -1  -> straight up  (180°, green)
+const HIGHLIGHT_MODEL_BASE_COLOR = 0x2299ff;
+const HIGHLIGHT_COLOR = 0x00ff00;
+const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
+
+const ANGLE_HIGHLIGHTS: {
+  rootJoint: BodyPart;
+  midJoint: BodyPart;
+  highlightParts: BodyPart[];
+}[] = [
+  { rootJoint: BodyPart.LEFT_UPPER_LEG, midJoint: BodyPart.LEFT_LOWER_LEG, highlightParts: [BodyPart.LEFT_UPPER_LEG] },
+  { rootJoint: BodyPart.LEFT_LOWER_LEG, midJoint: BodyPart.LEFT_FOOT, highlightParts: [BodyPart.LEFT_LOWER_LEG, BodyPart.LEFT_FOOT] },
+  { rootJoint: BodyPart.RIGHT_UPPER_LEG, midJoint: BodyPart.RIGHT_LOWER_LEG, highlightParts: [BodyPart.RIGHT_UPPER_LEG] },
+  { rootJoint: BodyPart.RIGHT_LOWER_LEG, midJoint: BodyPart.RIGHT_FOOT, highlightParts: [BodyPart.RIGHT_LOWER_LEG, BodyPart.RIGHT_FOOT] },
+  { rootJoint: BodyPart.LEFT_UPPER_ARM, midJoint: BodyPart.LEFT_LOWER_ARM, highlightParts: [BodyPart.LEFT_UPPER_ARM] },
+  { rootJoint: BodyPart.LEFT_LOWER_ARM, midJoint: BodyPart.LEFT_HAND, highlightParts: [BodyPart.LEFT_LOWER_ARM, BodyPart.LEFT_HAND] },
+  { rootJoint: BodyPart.RIGHT_UPPER_ARM, midJoint: BodyPart.RIGHT_LOWER_ARM, highlightParts: [BodyPart.RIGHT_UPPER_ARM] },
+  { rootJoint: BodyPart.RIGHT_LOWER_ARM, midJoint: BodyPart.RIGHT_HAND, highlightParts: [BodyPart.RIGHT_LOWER_ARM, BodyPart.RIGHT_HAND] },
+];
+
+// |dot| below this -> within ~15° of horizontal (90°).
+const ANGLE_DOT_THRESHOLD = 0.26;
+// dot below this (negative) -> within ~14° of straight-up (180°).
+const DOT_180_THRESHOLD = -0.75;
+
+>>>>>>> feature/applications
 // One Euro Filter (Casiez et al.): an adaptive low-pass filter that smooths noise
 // heavily when the signal is nearly static but relaxes toward zero lag as the signal
 // starts moving quickly -- exactly the "filter noise without adding latency" behavior
@@ -213,6 +250,7 @@ export class MocapScene {
   private worldQuat = new THREE.Quaternion();
   private desiredWorld = new THREE.Quaternion();
 
+<<<<<<< HEAD
   private poseCalibrated = false;
   private calibratedHip = new THREE.Vector3();
   private floorY = 0;
@@ -258,6 +296,62 @@ export class MocapScene {
   constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void) {
     this.onModelStatus = onModelStatus ?? null;
 
+=======
+  // ---- 90°/180° highlight state ----
+  private skinnedMesh: THREE.SkinnedMesh | null = null;
+  private vertexInfluenceByPart = new Map<BodyPart, Set<number>>();
+  private vertexColorsReady = false;
+  private modelHighlightMeshes = new Map<number, THREE.Mesh>();
+  private lastAngleDebugLog = 0;
+  private onAngleDebug: ((lines: string[]) => void) | null = null;
+
+  private poseCalibrated = false;
+  private calibratedHip = new THREE.Vector3();
+  private floorY = 0;
+  // Foot-lock locomotion state (walk mode). Everything is in server/world space; the
+  // model is translated by (hipWorldTarget - calibratedHip) so the calibration pose
+  // maps to the origin. The relative geometry (foot - hip) used below is invariant to
+  // any global drift the server might apply, which is why it is robust.
+  private hipWorldTarget = new THREE.Vector3(); // desired hip world position this frame
+  private anchor = new THREE.Vector3();          // locked world position of the planted foot
+  private appliedRoot = new THREE.Vector3();     // last root translation actually applied
+  private plantedFoot: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private plantedGrounded = false;
+  // A contact-state change must persist this many frames before we trust it and
+  // re-anchor -- this is what tells intentional weight transfer apart from one noisy
+  // frame, so standing still can't slowly random-walk the root away from center.
+  private contactCandidate: BodyPart.LEFT_FOOT | BodyPart.RIGHT_FOOT | null = null;
+  private contactCandidateFrames = 0;
+  // Horizontal-only stationary lock: while hip speed stays below the enter threshold the
+  // root's x/z are pinned to wherever they were when we went stationary, so sensor noise
+  // cannot accumulate into drift. Vertical (squat/sit) is never gated by this.
+  private stationary = false;
+  private stationaryLockX = 0;
+  private stationaryLockZ = 0;
+  private walkActive = false;
+  private plantJustChanged = false;
+  private leftContact = false;
+  private rightContact = false;
+  private currentFilterCutoff = EURO_MIN_CUTOFF;
+  private floorYModel = 0;
+  private floorCaptured = false;
+  private _lFootWorld = new THREE.Vector3();
+  private _rFootWorld = new THREE.Vector3();
+  private _plantCorr = new THREE.Vector3();
+  private _plantTarget = new THREE.Vector3();
+  private hipFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private leftFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private rightFootFilter = new OneEuroFilterVector3(EURO_MIN_CUTOFF, EURO_BETA, EURO_D_CUTOFF);
+  private previousLeftFoot: THREE.Vector3 | null = null;
+  private previousRightFoot: THREE.Vector3 | null = null;
+  private previousHip: THREE.Vector3 | null = null;
+  private lastPoseTime = performance.now();
+
+  constructor(canvas: HTMLCanvasElement, onModelStatus?: (status: string) => void, onAngleDebug?: (lines: string[]) => void) {
+    this.onModelStatus = onModelStatus ?? null;
+    this.onAngleDebug = onAngleDebug ?? null;
+
+>>>>>>> feature/applications
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(canvas.parentElement!.clientWidth, canvas.parentElement!.clientHeight);
@@ -408,6 +502,9 @@ export class MocapScene {
         this.bindPoseWorld.set(bp, bone.getWorldQuaternion(new THREE.Quaternion()));
       }
 
+      this.skinnedMesh = skinnedMesh;
+      this.precomputeVertexInfluences();
+
       this.mixamoLoaded = true;
       this.onModelStatus?.('Model loaded');
     } catch (err) {
@@ -515,6 +612,220 @@ if (this.mixamoScene) {
 
       this.applyFootPlant(walkEnabled);
       this.updatePoseFeedback();
+<<<<<<< HEAD
+=======
+
+      const highlightSet = this.computeHighlightSet(bones);
+      this.applyModelHighlight(highlightSet);
+      this.updateModelHighlights(highlightSet);
+  }
+
+  // ---- 90°/180° detection + rendering -------------------------------------
+  private computeHighlightSet(bones: BoneT[]): Set<BodyPart> {
+    const posByPart = new Map<BodyPart, THREE.Vector3>();
+    const rotByPart = new Map<BodyPart, THREE.Quaternion>();
+    for (const b of bones) {
+      if (b.headPositionG) {
+        posByPart.set(b.bodyPart, new THREE.Vector3(b.headPositionG.x, b.headPositionG.y, b.headPositionG.z));
+      }
+      if (b.rotationG) {
+        rotByPart.set(b.bodyPart, new THREE.Quaternion(b.rotationG.x, b.rotationG.y, b.rotationG.z, b.rotationG.w));
+      }
+    }
+
+    const limbDir = new THREE.Vector3();
+    const highlightSet = new Set<BodyPart>();
+    const debugParts: string[] = [];
+
+    for (const cfg of ANGLE_HIGHLIGHTS) {
+      const root = posByPart.get(cfg.rootJoint);
+      const mid = posByPart.get(cfg.midJoint);
+
+      let dot: number | null = null;
+
+      if (root && mid) {
+        limbDir.subVectors(mid, root);
+        if (limbDir.lengthSq() > 1e-6) {
+          dot = limbDir.normalize().dot(WORLD_DOWN);
+        }
+      }
+
+      if (dot === null) {
+        // Single-tracker fallback: only the root joint's own orientation is
+        // available this frame (e.g. just the upper-arm tracker).
+        const rot = rotByPart.get(cfg.rootJoint);
+        if (rot) {
+          limbDir.copy(WORLD_DOWN).applyQuaternion(rot.clone().invert());
+          dot = limbDir.normalize().dot(WORLD_DOWN);
+        }
+      }
+
+      let state = 'no data';
+      if (dot !== null) {
+        const is90deg = Math.abs(dot) < ANGLE_DOT_THRESHOLD;
+        const is180deg = dot < DOT_180_THRESHOLD;
+        const approxDeg = (Math.acos(Math.max(-1, Math.min(1, dot))) * 180) / Math.PI;
+        state = `${approxDeg.toFixed(0)}° from down${is90deg || is180deg ? ' -> GREEN' : ''}`;
+        if (is90deg || is180deg) {
+          for (const part of cfg.highlightParts) highlightSet.add(part);
+        }
+      }
+      debugParts.push(`${BodyPart[cfg.rootJoint]}: ${state}`);
+    }
+
+    const now = performance.now();
+    if (now - this.lastAngleDebugLog > 1000) {
+      this.lastAngleDebugLog = now;
+    }
+    this.onAngleDebug?.(debugParts);
+
+    return highlightSet;
+  }
+
+  /** For each body part, which vertex indices are influenced by its bone (weight > 0.3). */
+  private precomputeVertexInfluences() {
+    const mesh = this.skinnedMesh;
+    if (!mesh) return;
+    const geom = mesh.geometry;
+    const skinIndex = geom.attributes.skinIndex;
+    const skinWeight = geom.attributes.skinWeight;
+    if (!skinIndex || !skinWeight) return;
+
+    const boneToIdx = new Map<THREE.Bone, number>();
+    mesh.skeleton.bones.forEach((b, i) => boneToIdx.set(b, i));
+
+    for (const [bp, bone] of this.mixamoBones) {
+      const bi = boneToIdx.get(bone);
+      if (bi === undefined) continue;
+      const verts = new Set<number>();
+      const vCount = geom.attributes.position.count;
+      for (let i = 0; i < vCount; i++) {
+        const i4 = i * 4;
+        for (let j = 0; j < 4; j++) {
+          if (skinIndex.array[i4 + j] === bi && skinWeight.array[i4 + j] > 0.3) {
+            verts.add(i);
+            break;
+          }
+        }
+      }
+      this.vertexInfluenceByPart.set(bp, verts);
+    }
+  }
+
+  /** Paints the skinned mesh's own vertex colors green on highlighted body parts. */
+  private applyModelHighlight(highlightSet: Set<BodyPart>) {
+    const mesh = this.skinnedMesh;
+    if (!mesh) return;
+
+    const geom = mesh.geometry;
+    const count = geom.attributes.position.count;
+
+    if (!this.vertexColorsReady) {
+      const defaultColor = new Float32Array(count * 3);
+      const def = new THREE.Color(HIGHLIGHT_MODEL_BASE_COLOR);
+      for (let i = 0; i < count; i++) {
+        const i3 = i * 3;
+        defaultColor[i3] = def.r;
+        defaultColor[i3 + 1] = def.g;
+        defaultColor[i3 + 2] = def.b;
+      }
+      geom.setAttribute('color', new THREE.BufferAttribute(defaultColor, 3));
+      const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
+      mat.vertexColors = true;
+      mesh.material = mat;
+      this.vertexColorsReady = true;
+    }
+
+    // Only touch vertex colors if something is actually highlighted or was
+    // highlighted last frame — avoids per-frame full-mesh writes when idle.
+    if (highlightSet.size === 0 && !this._anyHighlightedLastFrame) return;
+    this._anyHighlightedLastFrame = highlightSet.size > 0;
+
+    const colors = geom.attributes.color.array as Float32Array;
+    const def = new THREE.Color(HIGHLIGHT_MODEL_BASE_COLOR);
+    const hl = new THREE.Color(0.15, 4.0, 0.15); // pushed past 1.0 so lighting can't dull it to a muddy green
+
+    for (let i = 0; i < count; i++) {
+      const i3 = i * 3;
+      colors[i3] = def.r;
+      colors[i3 + 1] = def.g;
+      colors[i3 + 2] = def.b;
+    }
+
+    for (const bp of highlightSet) {
+      const verts = this.vertexInfluenceByPart.get(bp);
+      if (!verts) continue;
+      for (const vi of verts) {
+        const i3 = vi * 3;
+        colors[i3] = hl.r;
+        colors[i3 + 1] = hl.g;
+        colors[i3 + 2] = hl.b;
+      }
+    }
+
+    geom.attributes.color.needsUpdate = true;
+  }
+
+  private _anyHighlightedLastFrame = false;
+
+  /** Glowing overlay tube drawn on top of the model for extra visibility. */
+  private ensureModelHighlightMesh(idx: number): THREE.Mesh {
+    let mesh = this.modelHighlightMeshes.get(idx);
+    if (!mesh) {
+      const geo = new THREE.CylinderGeometry(0.06, 0.06, 1, 12, 1, true);
+      const mat = new THREE.MeshBasicMaterial({
+        color: HIGHLIGHT_COLOR,
+        transparent: true,
+        opacity: 0.95,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        toneMapped: false,
+      });
+      mesh = new THREE.Mesh(geo, mat);
+      mesh.renderOrder = 10;
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.modelHighlightMeshes.set(idx, mesh);
+    }
+    return mesh;
+  }
+
+  private updateModelHighlights(highlightSet: Set<BodyPart>) {
+    if (!this.mixamoScene) return;
+
+    const posB = new THREE.Vector3();
+    const posC = new THREE.Vector3();
+    const mid = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+
+    ANGLE_HIGHLIGHTS.forEach((cfg, idx) => {
+      const mesh = this.ensureModelHighlightMesh(idx);
+      const boneB = this.mixamoBones.get(cfg.rootJoint);
+      const boneC = this.mixamoBones.get(cfg.midJoint);
+
+      const active = cfg.highlightParts.some((p) => highlightSet.has(p));
+
+      if (!boneB || !boneC || !active) {
+        mesh.visible = false;
+        return;
+      }
+
+      boneB.getWorldPosition(posB);
+      boneC.getWorldPosition(posC);
+      dir.subVectors(posC, posB);
+      const len = dir.length();
+      if (len < 0.001) {
+        mesh.visible = false;
+        return;
+      }
+
+      mid.addVectors(posB, posC).multiplyScalar(0.5);
+      mesh.position.copy(mid);
+      mesh.scale.set(1, len, 1);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+      mesh.visible = true;
+    });
+>>>>>>> feature/applications
   }
 
 private updateRootAndPelvis(
@@ -963,7 +1274,11 @@ private updateRootAndPelvis(
     }
 
     for (const [key, mesh] of this.poseOverlays) {
+<<<<<<< HEAD
       if (!activeKeys.has(key)) {
+=======
+      if (!activeKeys.has(`${key}`)) {
+>>>>>>> feature/applications
         mesh.visible = false;
       }
     }
