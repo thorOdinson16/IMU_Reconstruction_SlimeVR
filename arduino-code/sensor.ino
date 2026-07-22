@@ -153,9 +153,14 @@ void setup() {
   memcpy(peerInfo.peer_addr, HUB_MAC, 6);
   peerInfo.channel = ch;
   peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+  esp_err_t addResult = esp_now_add_peer(&peerInfo);
+  if (addResult != ESP_OK && addResult != ESP_ERR_ESPNOW_EXIST) {
+    // Genuine failure (e.g. peer table full) — this is the one case worth
+    // halting on, since without a peer entry no data can ever be sent.
     while (1) { digitalWrite(LED_RED, LOW); delay(100); digitalWrite(LED_RED, HIGH); delay(100); }
   }
+  // ESP_ERR_ESPNOW_EXIST just means the discovery sweep's own add/delete
+  // cycle left this peer registered already — that's fine, proceed normally.
 
   if (mpu.dmpInitialize() == 0) {
     mpu.setDMPEnabled(true);

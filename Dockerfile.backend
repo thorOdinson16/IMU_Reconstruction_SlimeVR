@@ -6,6 +6,7 @@ RUN ./gradlew installDist --no-daemon -x test
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /build/build/install/MyMotionTracking /app
+COPY --from=build /build/core/src/main/java/dev/slimevr/util/collage.py /app/collage.py
 RUN mkdir -p /app/RecordLogs
 EXPOSE 5005/udp 21110 21111
 CMD ["/app/bin/MyMotionTracking"]

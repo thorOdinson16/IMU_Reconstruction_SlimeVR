@@ -130,17 +130,36 @@ void onEspNowReceive(const esp_now_recv_info *info, const uint8_t *incomingData,
     memcpy(&probe, incomingData, sizeof(probe));
     if (memcmp(probe.magic, "WHO?", 4) != 0) return;
 
-    esp_now_peer_info_t replyPeer = {};
-    memcpy(replyPeer.peer_addr, info->src_addr, 6);
-    replyPeer.channel = WiFi.channel(); // whatever channel we're locked to post-discovery
-    replyPeer.encrypt = false;
-    if (esp_now_add_peer(&replyPeer) == ESP_OK) {
-      ProbeReply reply;
-      memcpy(reply.magic, "HERE", 4);
-      reply.channel = replyPeer.channel;
-      esp_now_send(info->src_addr, (uint8_t*)&reply, sizeof(reply));
-      esp_now_del_peer(info->src_addr);
+    // Guard against duplicate registration: with up to 4 sensors sweeping
+    // 13 channels each at boot, this handler can be hit by bursts of WHO?
+    // probes in quick succession. Blindly calling esp_now_add_peer every
+    // time can exhaust/corrupt the peer table and cause other sensors'
+    // probes to silently fail. Check first, and only add if genuinely new.
+    esp_now_peer_info_t existing;
+    bool alreadyPeer = (esp_now_get_peer(info->src_addr, &existing) == ESP_OK);
+
+    if (!alreadyPeer) {
+      esp_now_peer_info_t replyPeer = {};
+      memcpy(replyPeer.peer_addr, info->src_addr, 6);
+      replyPeer.channel = WiFi.channel(); // whatever channel we're locked to post-discovery
+      replyPeer.encrypt = false;
+      esp_err_t addResult = esp_now_add_peer(&replyPeer);
+      if (addResult != ESP_OK && addResult != ESP_ERR_ESPNOW_EXIST) {
+        // Table full or other failure — don't reply, sensor will retry
+        // on its next channel sweep pass instead of getting a broken ack.
+        return;
+      }
     }
+
+    ProbeReply reply;
+    memcpy(reply.magic, "HERE", 4);
+    reply.channel = WiFi.channel();
+    esp_now_send(info->src_addr, (uint8_t*)&reply, sizeof(reply));
+    // NOTE: peer intentionally NOT deleted here anymore — the sensor is
+    // about to start sending real SensorData packets on this same peer
+    // entry. Deleting it right after the reply created a window where a
+    // fast-following data packet could arrive before the sensor's own
+    // peer registration completed, causing it to be silently dropped.
   }
 }
 
@@ -188,7 +207,8 @@ void setup() {
   memcpy(peerInfo.peer_addr, DONGLE_MAC, 6);
   peerInfo.channel = ch;
   peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+  esp_err_t dongleAddResult = esp_now_add_peer(&peerInfo);
+  if (dongleAddResult != ESP_OK && dongleAddResult != ESP_ERR_ESPNOW_EXIST) {
     while (1) { digitalWrite(LED_RED, LOW); delay(100); digitalWrite(LED_RED, HIGH); delay(100); }
   }
 

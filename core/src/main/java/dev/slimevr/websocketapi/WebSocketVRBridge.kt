@@ -118,7 +118,12 @@ class WebSocketVRBridge(
 	}
 
 	override fun onMessage(conn: WebSocket, message: String) {
-		// LogManager.info(message);
+		// Delegate recording commands to parent (RECORD:START, RECORD:STOP, CSV_EVENT:*)
+		if (message.startsWith("RECORD:") || message.startsWith("CSV_EVENT:")) {
+			super.onMessage(conn, message)
+			return
+		}
+
 		try {
 			val json = mapper.readTree(message) as ObjectNode
 			if (json.has("type")) {

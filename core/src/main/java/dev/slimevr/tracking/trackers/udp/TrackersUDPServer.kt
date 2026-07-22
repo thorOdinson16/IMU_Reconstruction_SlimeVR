@@ -197,7 +197,6 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 	private val SENSOR_DATA_SIZE = 26
 	private val FRAME_SIZE = 2 + SENSOR_DATA_SIZE + 1
-	private val lastSeqByLabel = ConcurrentHashMap<String, Int>()
 
 	/**
 	 * Opens the dongle's serial port and reads binary tracker frames directly
@@ -226,11 +225,30 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 					val inStream = port.inputStream
 					val frameBuf = ByteArray(FRAME_SIZE)
+					var consecutiveEofCount = 0
 
 					while (port.isOpen) {
 						// Resync: scan for 0xAA 0x55 sync bytes before trusting the frame.
-						if (readByteBlocking(inStream) != 0xAA) continue
-						if (readByteBlocking(inStream) != 0x55) continue
+						val b0 = readByteBlocking(inStream)
+						if (b0 < 0) {
+							// Stream returned EOF/error — the device likely disappeared
+							// (unplugged, brownout, USB re-enumeration). port.isOpen can
+							// lag behind the actual disconnect, so don't spin here: bail
+							// out to the outer loop, close, and force a clean reopen.
+							consecutiveEofCount++
+							if (consecutiveEofCount > 10) {
+								LogManager.warning("[TrackerServer] Dongle serial stream returned EOF repeatedly — device likely disconnected, forcing reconnect")
+								break
+							}
+							Thread.sleep(50)
+							continue
+						}
+						consecutiveEofCount = 0
+						if (b0 != 0xAA) continue
+
+						val b1 = readByteBlocking(inStream)
+						if (b1 < 0) break
+						if (b1 != 0x55) continue
 
 						var offset = 0
 						while (offset < SENSOR_DATA_SIZE + 1) {
@@ -254,7 +272,15 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				} catch (e: Exception) {
 					LogManager.warning("[TrackerServer] Dongle serial error: ${e.message}, reconnecting in 2s")
 				} finally {
-					port?.closePort()
+					// Always fully close before the next loop iteration re-enumerates
+					// the port fresh via SerialPort.getCommPort() — this avoids reusing
+					// a stale handle to a device node that may have been reassigned
+					// after an unplug/replug or USB re-enumeration.
+					try {
+						port?.closePort()
+					} catch (e: Exception) {
+						LogManager.warning("[TrackerServer] Error closing dongle port during cleanup: ${e.message}")
+					}
 				}
 				Thread.sleep(2000)
 			}
@@ -284,17 +310,6 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		val qx = bb.float
 		val qy = bb.float
 		val qz = bb.float
-		val seq = bb.short.toInt() and 0xFFFF
-
-		// Loss detection: log gaps, don't act on them (per design — no retry/ack).
-		val prevSeq = lastSeqByLabel.put(label, seq)
-		if (prevSeq != null) {
-			val expected = (prevSeq + 1) and 0xFFFF
-			if (seq != expected) {
-				val gap = (seq - expected) and 0xFFFF
-				LogManager.warning("[TrackerServer] Dropped $gap frame(s) for $label")
-			}
-		}
 
 		// Reuse the existing parser instead of duplicating tracker setup /
 		// alignment / rotation logic — same code path as UDP text packets.

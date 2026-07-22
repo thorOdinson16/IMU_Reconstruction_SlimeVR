@@ -71,19 +71,27 @@ void onEspNowReceive(const esp_now_recv_info *info, const uint8_t *incomingData,
     memcpy(&probe, incomingData, sizeof(probe));
     if (memcmp(probe.magic, "WHO?", 4) != 0) return;
 
-    // A hub is looking for us. Register it as a peer and reply.
-    esp_now_peer_info_t replyPeer = {};
-    memcpy(replyPeer.peer_addr, info->src_addr, 6);
-    replyPeer.channel = DONGLE_CHANNEL;
-    replyPeer.encrypt = false;
-    if (esp_now_add_peer(&replyPeer) == ESP_OK) {
-      ProbeReply reply;
-      memcpy(reply.magic, "HERE", 4);
-      reply.channel = DONGLE_CHANNEL;
-      esp_now_send(info->src_addr, (uint8_t*)&reply, sizeof(reply));
-      // Keep the peer registered (don't del) — hubs push continuously,
-      // we want them to stay in the peer table for as long as they're active.
+    // A hub is looking for us. Register it as a peer (if not already) and reply.
+    esp_now_peer_info_t existing;
+    bool alreadyPeer = (esp_now_get_peer(info->src_addr, &existing) == ESP_OK);
+
+    if (!alreadyPeer) {
+      esp_now_peer_info_t replyPeer = {};
+      memcpy(replyPeer.peer_addr, info->src_addr, 6);
+      replyPeer.channel = DONGLE_CHANNEL;
+      replyPeer.encrypt = false;
+      esp_err_t addResult = esp_now_add_peer(&replyPeer);
+      if (addResult != ESP_OK && addResult != ESP_ERR_ESPNOW_EXIST) {
+        return; // table full or other failure — hub will retry next sweep pass
+      }
     }
+
+    ProbeReply reply;
+    memcpy(reply.magic, "HERE", 4);
+    reply.channel = DONGLE_CHANNEL;
+    esp_now_send(info->src_addr, (uint8_t*)&reply, sizeof(reply));
+    // Peer stays registered — hubs push continuously, we want them to
+    // stay in the peer table for as long as they're active.
   }
 }
 

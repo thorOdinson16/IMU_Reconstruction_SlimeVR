@@ -66,6 +66,10 @@ public class ConfigManager {
 		} catch (AtomicMoveNotSupportedException | FileAlreadyExistsException e) {
 			// Atomic move not supported or does not replace, try just replacing
 			Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+		} catch (IOException e) {
+			// Fallback: copy then delete (handles Docker bind mounts, etc.)
+			Files.copy(from, to, StandardCopyOption.REPLACE_EXISTING);
+			Files.deleteIfExists(from);
 		}
 	}
 
