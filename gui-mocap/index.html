@@ -16,6 +16,18 @@
         <span id="model-status"></span>
         <span id="rec-indicator" class="rec-indicator" style="display:none"><span class="rec-dot"></span><span id="rec-timer">00:00</span></span>
       </div>
+      <div id="angle-debug" class="angle-debug-panel" style="display:none">
+        <div class="angle-row"><span>L Elbow</span><span id="angle-leftElbow">--</span></div>
+        <div class="angle-row"><span>R Elbow</span><span id="angle-rightElbow">--</span></div>
+        <div class="angle-row"><span>L Knee</span><span id="angle-leftKnee">--</span></div>
+        <div class="angle-row"><span>R Knee</span><span id="angle-rightKnee">--</span></div>
+        <div class="angle-row"><span>L Sh Abd</span><span id="angle-leftShoulderAbduction">--</span></div>
+        <div class="angle-row"><span>R Sh Abd</span><span id="angle-rightShoulderAbduction">--</span></div>
+        <div class="angle-row"><span>L Hip Flex</span><span id="angle-leftHipFlexion">--</span></div>
+        <div class="angle-row"><span>R Hip Flex</span><span id="angle-rightHipFlexion">--</span></div>
+        <div class="angle-row"><span>Trunk Lean</span><span id="angle-trunkLean">--</span></div>
+        <div class="angle-row"><span>Spine Yaw</span><span id="angle-spineRotationYaw">--</span></div>
+      </div>
       <div id="controls">
         <button class="btn" data-cmd="reset-yaw" title="Zero yaw rotation on all trackers">Reset Yaw</button>
         <button class="btn" data-cmd="reset-full" title="Full pose reset (T-pose)">Reset Full</button>
@@ -25,6 +37,7 @@
         <button class="btn btn-apply" data-cmd="autobone-apply" title="Apply AutoBone results">AB Apply</button>
         <button class="btn btn-walk" data-cmd="toggle-walk" title="Toggle walking mode">Walk: OFF</button>
         <button class="btn btn-record" data-cmd="toggle-record" title="Toggle recording (screen + CSV)">Record: OFF</button>
+        <button class="btn" data-cmd="toggle-angle-debug" title="Show/hide live joint angle readout">Angles: OFF</button>
       </div>
       <div id="info">
         <p>Connect your sensors and ensure the SlimeVR server is running.</p>

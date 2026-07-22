@@ -216,6 +216,7 @@ class HumanSkeleton(
 	var localizer = Localizer(this)
 	var ikSolver = IKSolver(headBone)
 	var userHeightCalibration: UserHeightCalibration? = null
+	private val pelvisEstimator = PelvisEstimator()
 
 	// Stay Aligned
 	var trackerSkeleton = TrackerSkeleton(this)
@@ -667,14 +668,23 @@ class HumanSkeleton(
 	}
 
 	/**
-	 * Adjusts the pelvis/hip tracker position based on foot contact state.
+	 * Adjusts the pelvis/hip tracker position based on foot contact state,
+	 * using the bottom-up bone-chain pelvis estimator (Patil et al.,
+	 * Sensors 2020, Algorithm 1) in place of the previous XZ-delta method.
 	 *
-	 * Bottom-Up (at least one foot LOCKED): compute hip position by anchoring
-	 * the planted foot to its previous corrected position. This prevents
-	 * pelvis drift when a foot is stationary on the ground.
+	 * Bottom-Up (at least one foot LOCKED): rotate up from the planted
+	 * foot's last corrected position through ankle -> knee -> hip, using
+	 * each bone's current world rotation and length, to get a pelvis
+	 * position estimate. Both feet LOCKED: average the two legs'
+	 * estimates (double support).
 	 *
-	 * Top-Down (both feet UNLOCKED): no adjustment; pelvis stays where the
-	 * spine chain + localizer put it, letting legs swing freely.
+	 * Top-Down (both feet UNLOCKED): no adjustment; pelvis stays where
+	 * the spine chain + localizer put it, letting legs swing freely.
+	 *
+	 * Note: this has no lidar/ranging correction, so it only removes
+	 * drift accumulated *during* a foot plant, using the locked foot's
+	 * corrected position as the fixed anchor -- it does not correct
+	 * absolute world drift between plants.
 	 */
 	private fun updatePelvisFromContact() {
 		val bufferHead = legTweaks.bufferHead
@@ -686,40 +696,44 @@ class HumanSkeleton(
 		val bufPrev = bufferHead.parent ?: return
 		val hipPos = computedHipTracker?.position ?: return
 
-		if (leftLocked && rightLocked) {
-			val leftFootPos = computedLeftFootTracker?.position ?: return
-			val rightFootPos = computedRightFootTracker?.position ?: return
-			val leftCorr = Vector3(
-				bufPrev.leftFootPositionCorrected.x - leftFootPos.x,
-				0f,
-				bufPrev.leftFootPositionCorrected.z - leftFootPos.z,
-			)
-			val rightCorr = Vector3(
-				bufPrev.rightFootPositionCorrected.x - rightFootPos.x,
-				0f,
-				bufPrev.rightFootPositionCorrected.z - rightFootPos.z,
-			)
-			val avgCorr = (leftCorr + rightCorr) * 0.5f
-			computedHipTracker!!.position = Vector3(
-				hipPos.x + avgCorr.x,
-				hipPos.y,
-				hipPos.z + avgCorr.z,
-			)
-		} else if (leftLocked) {
-			val footPos = computedLeftFootTracker?.position ?: return
-			computedHipTracker!!.position = Vector3(
-				hipPos.x + bufPrev.leftFootPositionCorrected.x - footPos.x,
-				hipPos.y,
-				hipPos.z + bufPrev.leftFootPositionCorrected.z - footPos.z,
+		val leftLeg = if (leftLocked) {
+			PelvisEstimator.LegChainInput(
+				footPosition = bufPrev.leftFootPositionCorrected,
+				ankleRot = leftLowerLegBone.getGlobalRotation(),
+				kneeRot = leftUpperLegBone.getGlobalRotation(),
+				hipRot = leftHipBone.getGlobalRotation(),
+				lowerLegLength = leftLowerLegBone.length,
+				upperLegLength = leftUpperLegBone.length,
+				hipLength = leftHipBone.length,
 			)
 		} else {
-			val footPos = computedRightFootTracker?.position ?: return
-			computedHipTracker!!.position = Vector3(
-				hipPos.x + bufPrev.rightFootPositionCorrected.x - footPos.x,
-				hipPos.y,
-				hipPos.z + bufPrev.rightFootPositionCorrected.z - footPos.z,
-			)
+			null
 		}
+
+		val rightLeg = if (rightLocked) {
+			PelvisEstimator.LegChainInput(
+				footPosition = bufPrev.rightFootPositionCorrected,
+				ankleRot = rightLowerLegBone.getGlobalRotation(),
+				kneeRot = rightUpperLegBone.getGlobalRotation(),
+				hipRot = rightHipBone.getGlobalRotation(),
+				lowerLegLength = rightLowerLegBone.length,
+				upperLegLength = rightUpperLegBone.length,
+				hipLength = rightHipBone.length,
+			)
+		} else {
+			null
+		}
+
+		val estimatedPelvis = pelvisEstimator.estimatePelvisPosition(leftLeg, rightLeg) ?: return
+
+		// Keep the existing tracker's Y (height); only take X/Z from the
+		// bone-chain estimate, consistent with the previous XZ-only
+		// correction this replaces.
+		computedHipTracker!!.position = Vector3(
+			estimatedPelvis.x,
+			hipPos.y,
+			estimatedPelvis.z,
+		)
 	}
 
 	/**

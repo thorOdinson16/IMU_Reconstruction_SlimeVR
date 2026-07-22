@@ -1,11 +1,13 @@
 import { ProtocolClient } from './protocol';
 import { MocapScene } from './scene';
+import { extractJointAngles, type JointAngles } from './jointAngles';
 
 const connStatus = document.getElementById('conn-status')!;
 const trackerCount = document.getElementById('tracker-count')!;
 const modelStatus = document.getElementById('model-status')!;
 const recIndicator = document.getElementById('rec-indicator')!;
 const recTimer = document.getElementById('rec-timer')!;
+const angleDebugPanel = document.getElementById('angle-debug')!;
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 
 const WS_URL = `ws://${location.hostname}:21110`;
@@ -26,6 +28,7 @@ function ensureOffscreen() {
 }
 
 let walkEnabled = false;
+let angleDebugEnabled = false;
 let recording = false;
 let runNumber = '';
 let mediaRecorder: MediaRecorder | null = null;
@@ -146,9 +149,27 @@ scene.setWalkDebugCallback((data, ts) => {
   ].join(','));
 });
 
+function updateAngleDebugDisplay(angles: JointAngles): void {
+  document.getElementById('angle-leftElbow')!.textContent = angles.leftElbow !== null ? angles.leftElbow.toFixed(1) + '°' : '--';
+  document.getElementById('angle-rightElbow')!.textContent = angles.rightElbow !== null ? angles.rightElbow.toFixed(1) + '°' : '--';
+  document.getElementById('angle-leftKnee')!.textContent = angles.leftKnee !== null ? angles.leftKnee.toFixed(1) + '°' : '--';
+  document.getElementById('angle-rightKnee')!.textContent = angles.rightKnee !== null ? angles.rightKnee.toFixed(1) + '°' : '--';
+  document.getElementById('angle-leftShoulderAbduction')!.textContent = angles.leftShoulderAbduction !== null ? angles.leftShoulderAbduction.toFixed(1) + '°' : '--';
+  document.getElementById('angle-rightShoulderAbduction')!.textContent = angles.rightShoulderAbduction !== null ? angles.rightShoulderAbduction.toFixed(1) + '°' : '--';
+  document.getElementById('angle-leftHipFlexion')!.textContent = angles.leftHipFlexion !== null ? angles.leftHipFlexion.toFixed(1) + '°' : '--';
+  document.getElementById('angle-rightHipFlexion')!.textContent = angles.rightHipFlexion !== null ? angles.rightHipFlexion.toFixed(1) + '°' : '--';
+  document.getElementById('angle-trunkLean')!.textContent = angles.trunkLean !== null ? angles.trunkLean.toFixed(1) + '°' : '--';
+  document.getElementById('angle-spineRotationYaw')!.textContent = angles.spineRotationYaw !== null ? angles.spineRotationYaw.toFixed(1) + '°' : '--';
+}
+
 const client = new ProtocolClient(
   WS_URL,
-  (bones, syntheticTrackers, _index) => scene.update(bones, syntheticTrackers, walkEnabled),
+  (bones, syntheticTrackers, _index) => {
+    scene.update(bones, syntheticTrackers, walkEnabled);
+    if (angleDebugEnabled) {
+      updateAngleDebugDisplay(extractJointAngles(bones));
+    }
+  },
   (connected, msg) => {
     connStatus.textContent = msg;
     connStatus.className = connected ? 'connected' : 'disconnected';
@@ -356,6 +377,11 @@ document.getElementById('controls')!.addEventListener('click', (e) => {
         recordBtn.classList.add('active');
         pushLabel('Record ON');
       }
+      break;
+    case 'toggle-angle-debug':
+      angleDebugEnabled = !angleDebugEnabled;
+      angleDebugPanel.style.display = angleDebugEnabled ? 'block' : 'none';
+      (btn as HTMLElement).textContent = angleDebugEnabled ? 'Angles: ON' : 'Angles: OFF';
       break;
   }
 });
