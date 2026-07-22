@@ -15,6 +15,7 @@ import dev.slimevr.tracking.processor.HumanPoseManager
 import dev.slimevr.tracking.processor.skeleton.HumanSkeleton
 import dev.slimevr.tracking.trackers.*
 import dev.slimevr.tracking.trackers.udp.TrackersUDPServer
+import dev.slimevr.util.CsvLogger
 import dev.slimevr.util.ann.VRServerThread
 import dev.slimevr.websocketapi.WebSocketVRBridge
 import dev.slimevr.websocketapi.WebsocketAPI
@@ -25,6 +26,7 @@ import io.eiren.util.collections.FastList
 import io.eiren.util.logging.LogManager
 import solarxr_protocol.datatypes.TrackerIdT
 import solarxr_protocol.rpc.ResetType
+import java.io.File
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
@@ -79,6 +81,10 @@ class VRServer @JvmOverloads constructor(
 	@JvmField
 	val handshakeHandler = HandshakeHandler()
 
+	var csvLogger: CsvLogger? = null
+	var isCsvRecording: Boolean = false
+	private var lastCsvLogTime: Long = 0
+
 	// WebSocket API server instance (nullable)
 	private val websocketAPI: WebsocketAPI?
 
@@ -116,6 +122,18 @@ class VRServer @JvmOverloads constructor(
 
 		for (tracker in computedTrackers) {
 			registerTracker(tracker)
+		}
+
+		// CSV logging onTick
+		addOnTick {
+			if (isCsvRecording) {
+				val now = System.currentTimeMillis()
+				if (now - lastCsvLogTime >= 20) {
+					val activeTrackers = allTrackers.filter { !it.isInternal && !it.isComputed && it.hasRotation }
+					csvLogger?.log(activeTrackers)
+					lastCsvLogTime = now
+				}
+			}
 		}
 
 		// ========== FORCE DATA FEED SEND AFTER REGISTRATION ==========
@@ -378,6 +396,35 @@ class VRServer @JvmOverloads constructor(
 
 	fun setFloorClipEnabled(value: Boolean) {
 		queueTask { humanPoseManager.setFloorClipEnabled(value) }
+	}
+
+	fun startCsvRecording(): String {
+		if (isCsvRecording) {
+			csvLogger?.let {
+				val path = it.makeFilepath()
+				val name = File(path).nameWithoutExtension
+				return name.removePrefix("run_")
+			}
+			return ""
+		}
+		csvLogger = CsvLogger()
+		isCsvRecording = true
+		lastCsvLogTime = 0
+		val path = csvLogger!!.makeFilepath()
+		val runNumber = File(path).nameWithoutExtension.removePrefix("run_")
+		csvLogger!!.initFile(runNumber)
+		return runNumber
+	}
+
+	fun stopCsvRecording() {
+		if (!isCsvRecording) return
+		csvLogger?.close()
+		csvLogger = null
+		isCsvRecording = false
+	}
+
+	fun markCsvEvent(label: String) {
+		csvLogger?.markEvent(label)
 	}
 
 	val trackersCount: Int

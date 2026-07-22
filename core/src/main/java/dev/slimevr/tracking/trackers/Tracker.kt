@@ -469,7 +469,9 @@ class Tracker @JvmOverloads constructor(
 	 * Sets the raw (unadjusted) rotation of the tracker.
 	 */
 	fun setRotation(rotation: Quaternion) {
-		this._rotation = rotation
+		// Canonicalize q/-q polarity against the previous sample so downstream code
+		// (especially non-direction-tracking paths) stays temporally continuous.
+		this._rotation = rotation.twinNearest(_rotation)
 	}
 
 	/**

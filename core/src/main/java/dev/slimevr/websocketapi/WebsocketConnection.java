@@ -37,6 +37,12 @@ public class WebsocketConnection implements GenericConnection {
 		}
 	}
 
+	public void sendText(String text) {
+		if (this.conn.isOpen()) {
+			this.conn.send(text);
+		}
+	}
+
 	@Override
 	public UUID getConnectionId() {
 		return id;

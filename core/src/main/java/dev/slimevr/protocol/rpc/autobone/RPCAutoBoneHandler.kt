@@ -52,9 +52,17 @@ class RPCAutoBoneHandler(
 			.message(AutoBoneProcessRequest()) as AutoBoneProcessRequest
 		if (conn.context.useAutoBone) return
 		conn.context.useAutoBone = true
+		val processType = getById(req.processType())
+		if (processType == AutoBoneProcessType.RECORD) {
+			api.server.markCsvEvent("AUTOBONE_RECORD")
+		} else if (processType == AutoBoneProcessType.PROCESS) {
+			api.server.markCsvEvent("AUTOBONE_PROCESS")
+		} else if (processType == AutoBoneProcessType.SAVE) {
+			api.server.markCsvEvent("AUTOBONE_SAVE")
+		}
 		api.server
 			.autoBoneHandler
-			.startProcessByType(getById(req.processType()))
+			.startProcessByType(processType)
 	}
 
 	override fun onAutoBoneProcessStatus(

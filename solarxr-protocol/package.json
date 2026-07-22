@@ -1,7 +1,11 @@
 {
   "name": "solarxr-protocol",
   "version": "0.0.0",
-  "main": "index.js",
-  "module": "index.js",
-  "types": "index.d.ts"
+  "type": "module",
+  "main": "protocol/typescript/src/all_generated.ts",
+  "module": "protocol/typescript/src/all_generated.ts",
+  "types": "index.d.ts",
+  "exports": {
+    ".": "./protocol/typescript/src/all_generated.ts"
+  }
 }

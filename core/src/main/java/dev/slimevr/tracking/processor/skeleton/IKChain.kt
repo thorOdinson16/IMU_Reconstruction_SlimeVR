@@ -6,6 +6,7 @@ import dev.slimevr.tracking.trackers.Tracker
 import io.github.axisangles.ktmath.Quaternion
 import io.github.axisangles.ktmath.Vector3
 import kotlin.math.*
+import dev.slimevr.tracking.processor.BoneType
 
 /*
  * This class implements a chain of Bones
@@ -60,11 +61,30 @@ class IKChain(
 			// Compute the axis of rotation and angle for this bone
 			var scalar = IKSolver.DAMPENING_FACTOR * if (currentBone.rotationConstraint.hasTrackerRotation) IKSolver.STATIC_DAMPENING else 1f
 			scalar *= ((bones.size - i).toFloat() / bones.size).pow(IKSolver.ANNEALING_EXPONENT)
-			val adjustment = Quaternion.fromTo(endEffectorLocal, targetLocal).pow(scalar).unit()
+			val adjustment = Quaternion.fromTo(endEffectorLocal, targetLocal)
+				.pow(scalar)
+				.unit()
 
-			val rotation = currentBone.getGlobalRotation()
-			var correctedRot = (adjustment * rotation).unit()
+			var correctedRot = (adjustment * currentBone.getGlobalRotation()).unit()
 
+			// Prevent knees collapsing inward
+			if (
+				currentBone.boneType == BoneType.LEFT_UPPER_LEG
+			) {
+				correctedRot = currentBone.rotationConstraint.initialRotation.interpR(
+					correctedRot,
+					0.3f
+				) * Quaternion.rotationAroundXAxis(PI.toFloat())
+			}
+
+			if (
+				currentBone.boneType == BoneType.RIGHT_UPPER_LEG
+			) {
+				correctedRot = currentBone.rotationConstraint.initialRotation.interpR(
+					correctedRot,
+					0.3f
+				) * Quaternion.rotationAroundXAxis(PI.toFloat())
+			}
 			// Bones that are not supposed to be modified should tend towards their origin
 			if (!currentBone.rotationConstraint.allowModifications) {
 				correctedRot = correctedRot.interpR(currentBone.rotationConstraint.initialRotation, IKSolver.CORRECTION_FACTOR)
