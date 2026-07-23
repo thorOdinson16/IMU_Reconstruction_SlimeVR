@@ -11,6 +11,7 @@ const char* ssid       = "TP-Link_DF6C_Cave";
 const char* password   = "Caveiot@123";
 
 const char* server_ip1 = "192.168.1.217"; // "192.168.0.104"
+const char* server_ip2 = "192.168.1.159"; // 
 const unsigned int port   = 5005;
 
 const int LED_RED   = 1;
@@ -80,7 +81,14 @@ void onEspNowReceive(const esp_now_recv_info *info, const uint8_t *incomingData,
 void forwardPacket(const char* label, float qw, float qx, float qy, float qz) {
   char payload[64];
   snprintf(payload, sizeof(payload), "%s,%.4f,%.4f,%.4f,%.4f", label, qw, qx, qy, qz);
+  
+  // Send to first server
   udp.beginPacket(server_ip1, port);
+  udp.print(payload);
+  udp.endPacket();
+  
+  // Send to second server (your laptop)
+  udp.beginPacket(server_ip2, port);
   udp.print(payload);
   udp.endPacket();
 }
@@ -100,8 +108,10 @@ void connectWiFi() {
   Serial.println(" Connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  Serial.print("Sending to server IP: ");
-  Serial.println(server_ip1);
+  Serial.print("Sending to server IPs: ");
+  Serial.print(server_ip1);
+  Serial.print(" and ");
+  Serial.println(server_ip2);
 }
 
 void setup() {

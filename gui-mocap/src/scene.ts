@@ -227,6 +227,10 @@ export class MocapScene {
   private worldQuat = new THREE.Quaternion();
   private desiredWorld = new THREE.Quaternion();
 
+  private cameraTheta = 0;
+  private cameraPhi = 1.2;
+  private cameraRadius = 3.5;
+
   private poseCalibrated = false;
   private calibratedHip = new THREE.Vector3();
   private floorY = 0;
@@ -331,17 +335,6 @@ export class MocapScene {
     let isDragging = false;
     let prevX = 0;
     let prevY = 0;
-    let theta = 0;
-    let phi = 1.2;
-    let radius = 3.5;
-
-    const updateCam = () => {
-      const targetHeight = 0.9; 
-      this.camera.position.x = radius * Math.sin(phi) * Math.sin(theta);
-      this.camera.position.y = radius * Math.cos(phi) + targetHeight; 
-      this.camera.position.z = radius * Math.sin(phi) * Math.cos(theta);
-      this.camera.lookAt(0, targetHeight, 0); 
-    };
 
     this.renderer.domElement.addEventListener('pointerdown', (e) => {
       isDragging = true;
@@ -350,11 +343,11 @@ export class MocapScene {
     });
     window.addEventListener('pointermove', (e) => {
       if (!isDragging) return;
-      theta -= (e.clientX - prevX) * 0.01;
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi + (e.clientY - prevY) * 0.01));
+      this.cameraTheta -= (e.clientX - prevX) * 0.01;
+      this.cameraPhi = Math.max(0.05, Math.min(Math.PI - 0.05, this.cameraPhi + (e.clientY - prevY) * 0.01));
       prevX = e.clientX;
       prevY = e.clientY;
-      updateCam();
+      this.updateCam();
     });
     window.addEventListener('pointerup', () => {
       isDragging = false;
@@ -362,21 +355,38 @@ export class MocapScene {
     this.renderer.domElement.addEventListener(
       'wheel',
       (e) => {
-        radius = Math.max(1.2, Math.min(10, radius + e.deltaY * 0.005));
-        updateCam();
+        this.cameraRadius = Math.max(1.2, Math.min(10, this.cameraRadius + e.deltaY * 0.005));
+        this.updateCam();
       },
       { passive: true },
     );
-    updateCam();
+    this.updateCam();
   }
 
-  private resize() {
-    const parent = this.renderer.domElement.parentElement!;
+  private updateCam() {
+    const targetHeight = 0.9;
+    this.camera.position.x = this.cameraRadius * Math.sin(this.cameraPhi) * Math.sin(this.cameraTheta);
+    this.camera.position.y = this.cameraRadius * Math.cos(this.cameraPhi) + targetHeight;
+    this.camera.position.z = this.cameraRadius * Math.sin(this.cameraPhi) * Math.cos(this.cameraTheta);
+    this.camera.lookAt(0, targetHeight, 0);
+  }
+
+  resize() {
+    const parent = this.renderer.domElement.parentElement;
+    if (!parent) return;
     const w = parent.clientWidth;
     const h = parent.clientHeight;
+    if (w === 0 || h === 0) return;
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  setCameraFraming(theta: number, phi: number, radius: number) {
+    this.cameraTheta = theta;
+    this.cameraPhi = Math.max(0.05, Math.min(Math.PI - 0.05, phi));
+    this.cameraRadius = Math.max(1.2, Math.min(10, radius));
+    this.updateCam();
   }
 
   private async loadCharacter() {
@@ -469,6 +479,40 @@ export class MocapScene {
       this.walkDebugCallback(this._walkDebugSnapshot, performance.now());
       this._walkDebugSnapshot = null;
     }
+  }
+
+  /**
+   * Applies a static pose directly to Mixamo bones using local-space quaternions.
+   * Bones not present in the map keep their bind-pose rotation.
+   * The model is centered at the origin with no walk locomotion.
+   */
+  setStaticPose(localQuats: Map<BodyPart, THREE.Quaternion>) {
+    if (!this.mixamoLoaded || !this.mixamoScene) return;
+    this.mixamoScene.updateMatrixWorld(true);
+    const order: BodyPart[] = [
+      BodyPart.HIP, BodyPart.WAIST, BodyPart.CHEST, BodyPart.UPPER_CHEST,
+      BodyPart.NECK, BodyPart.HEAD,
+      BodyPart.LEFT_SHOULDER, BodyPart.LEFT_UPPER_ARM, BodyPart.LEFT_LOWER_ARM, BodyPart.LEFT_HAND,
+      BodyPart.RIGHT_SHOULDER, BodyPart.RIGHT_UPPER_ARM, BodyPart.RIGHT_LOWER_ARM, BodyPart.RIGHT_HAND,
+      BodyPart.LEFT_UPPER_LEG, BodyPart.LEFT_LOWER_LEG, BodyPart.LEFT_FOOT,
+      BodyPart.RIGHT_UPPER_LEG, BodyPart.RIGHT_LOWER_LEG, BodyPart.RIGHT_FOOT,
+    ];
+    for (const bp of order) {
+      const bone = this.mixamoBones.get(bp);
+      if (!bone) continue;
+      const q = localQuats.get(bp);
+      if (q) {
+        bone.quaternion.copy(q);
+      } else {
+        const rest = this.bindPoseLocal.get(bp);
+        if (rest) bone.quaternion.copy(rest);
+        else bone.quaternion.identity();
+      }
+      bone.updateMatrixWorld(true);
+    }
+    this.mixamoScene.updateMatrixWorld(true);
+    this.mixamoScene.position.set(0, 0, 0);
+    this.hideStickFigure();
   }
 
   private applyMixamoPose(bones: BoneT[], syntheticTrackers: TrackerDataT[], walkEnabled: boolean) {

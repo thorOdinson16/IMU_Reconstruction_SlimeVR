@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "flatbuffers": ["./node_modules/flatbuffers/mjs/index.d.ts"],
+      "three": ["./node_modules/@types/three"],
+      "three/examples/jsm/loaders/GLTFLoader.js": ["./node_modules/@types/three/examples/jsm/loaders/GLTFLoader.d.ts"],
+      "solarxr-protocol": ["../solarxr-protocol/protocol/typescript/src/all_generated.ts"]
+    },
+    "allowImportingTsExtensions": false,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": false
+  },
+  "include": ["src", "vite.config.ts"]
+}
